@@ -20,7 +20,7 @@
 1. **Клонируйте или создайте папку проекта** и перейдите в нее.
 2. **Установите необходимые библиотеки**:
    ```bash
-   pip install playwright configparser
+   pip install -r requirements.txt
    ```
 3. **Установите встроенный браузер Chromium** для библиотеки Playwright:
    ```bash
@@ -58,7 +58,7 @@ resume_main = https://hh.ru
 1. Измените в коде скрипта строчку `headless=True` на `headless=False` (в блоке инициализации браузера).
 2. Запустите скрипт через терминал:
    ```bash
-   python script.py
+   python hh_updater.py
    ```
 3. Откроется окно браузера Chromium на странице логина hh.ru. **Войдите в свой аккаунт соискателя** привычным способом.
 4. Как только вы окажетесь в личном кабинете, скрипт автоматически закроет браузер и создаст файл `auth_state.json`.
@@ -76,10 +76,10 @@ resume_main = https://hh.ru
    ```
 2. Скомпилируйте проект командой (флаг `--noconsole` скроет окно терминала):
    ```bash
-   pyinstaller --noconsole --onefile script.py
+   pyinstaller --noconsole --onefile hh_updater.py
    ```
-3. Перейдите в созданную папку `dist`, заберите оттуда файл `script.exe`.
-4. Перенесите `script.exe` в отдельную постоянную папку и **обязательно положите рядом** ваши файлы `config.ini` и `auth_state.json`.
+3. Перейдите в созданную папку `dist`, заберите оттуда файл `hh_updater.exe`.
+4. Перенесите `hh_updater.exe` в отдельную постоянную папку и **обязательно положите рядом** ваши файлы `config.ini` и `auth_state.json`.
 
 ---
 
