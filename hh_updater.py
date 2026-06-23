@@ -203,8 +203,20 @@ def main():
         status, wait_seconds = check_and_lift_resumes()
 
         if status:
-            sleep_time = 600
-            log_message(f"Часть резюме обновлена. Краткий сон перед проверкой остальных: {sleep_time} сек.")
+            # После успешного поднятия берем интервал из config.ini
+            try:
+                config = load_config()
+                sleep_time = int(config["SETTINGS"]["check_interval_seconds"])
+                log_message(f"[Успех] Резюме обновлено. Плановый сон из config.ini: {sleep_time} сек.")
+            except Exception:
+                # Если параметр называется по-другому или отсутствует
+                try:
+                    sleep_time = int(config["SETTINGS"]["fallback_interval_seconds"])
+                    log_message(f"[Успех] Резюме обновлено. Сон по fallback интервалу: {sleep_time} сек.")
+                except Exception:
+                    sleep_time = 14400  # 4 часа аварийный дефолт
+                    log_message(f"[Успех] Ошибка конфига. Аварийный сон: {sleep_time} сек.")
+
         elif wait_seconds is not None and wait_seconds > 0:
             sleep_time = wait_seconds + 60
             minutes = sleep_time // 60
