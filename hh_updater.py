@@ -22,16 +22,22 @@ AUTH_STATE_FILE = os.path.join(BASE_DIR, "auth_state.json")
 LOG_FILE = os.path.join(BASE_DIR, "log.txt")
 
 
-def log_message(message):
+def log_message(message, newline=True):
     """Синхронная запись логов в консоль и в файл log.txt."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     full_message = f"[{timestamp}] {message}"
-    print(full_message)
+
+    if newline:
+        print(full_message)
+    else:
+        # Вывод без переноса строки (для тикающего таймера)
+        print(full_message, end="", flush=True)
+
     try:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(full_message + "\n")
     except Exception as e:
-        print(f"Ошибка записи в лог-файл: {e}")
+        print(f"\nОшибка записи в лог-файл: {e}")
 
 
 def load_config():
@@ -56,7 +62,6 @@ def check_and_lift_resumes():
         return False, None
 
     resumes = config["RESUMES"]
-    # Безопасная фильтрация опечаток (строк без '=' или пустых строк)
     valid_resumes = [(k, v) for k, v in resumes.items() if v and not v.startswith('#')]
 
     if not valid_resumes:
@@ -72,7 +77,7 @@ def check_and_lift_resumes():
         # Режим АВТОРИЗАЦИИ (Если файла сессии еще нет)
         if not has_auth:
             log_message("[Авторизация] Сессия не найдена. Открываю окно браузера для входа...")
-            browser = p.chromium.launch(headless=False)  # Принудительно открываем окно
+            browser = p.chromium.launch(headless=False)
             context = browser.new_context()
             page = context.new_page()
 
@@ -80,13 +85,12 @@ def check_and_lift_resumes():
             log_message("[Авторизация] Ожидание входа пользователя (таймаут 3 минуты)...")
 
             try:
-                # Ждем успешной авторизации и редиректа из формы логина
                 page.wait_for_url(lambda u: "hh.ru" in u and "login" not in u, timeout=180000)
-                time.sleep(5)  # Даем кукам сохраниться
+                time.sleep(5)
                 context.storage_state(path=AUTH_STATE_FILE)
                 log_message("[Авторизация] Успех! Сессия сохранена в auth_state.json. Перезапускаю процесс...")
                 browser.close()
-                return False, 5  # Быстрый перезапуск через 5 секунд в фоновом режиме
+                return False, 5
             except Exception as e:
                 log_message(f"[Ошибка авторизации] Время ожидания истекло или вход отменен: {e}")
                 browser.close()
@@ -104,7 +108,6 @@ def check_and_lift_resumes():
                 page.goto(url)
                 page.wait_for_load_state("networkidle")
 
-                # Защита от вылета авторизации
                 if "login" in page.url:
                     log_message(
                         f"[Ошибка] Авторизация устарела для '{name}'. Удалите файл auth_state.json для повторного входа.")
@@ -113,7 +116,6 @@ def check_and_lift_resumes():
 
                 lift_button = page.locator("button:has-text('Поднять в поиске')").first
 
-                # Вариант 1: Кнопка доступна
                 if lift_button.is_visible() and lift_button.is_enabled():
                     log_message(f"Кнопка доступна. Нажимаю для '{name}'...")
                     lift_button.click()
@@ -122,14 +124,12 @@ def check_and_lift_resumes():
                     any_resume_lifted = True
                     continue
 
-                # Вариант 2: Кнопка заблокирована (парсим время)
                 status_section = page.locator(
                     "div:has-text('Можно сегодня в'), div:has-text('Можно завтра в'), div:has-text('Поднятие резюме')"
                 ).last
 
                 if status_section.is_visible():
                     text = status_section.inner_text()
-                    # Нормализация текста и очистка от неразрывных пробелов (\xa0)
                     clean_text = re.sub(r"\s+", " ", text).strip()
                     clean_text = re.sub(r"(?<=\s)\s+", "", clean_text)
 
@@ -173,10 +173,21 @@ def check_and_lift_resumes():
     return False, None
 
 
+def console_countdown(sleep_time):
+    """Каждую секунду обновляет одну и ту же строку в консоли, показывая остаток времени."""
+    for remaining in range(sleep_time, 0, -1):
+        hours, remainder = divmod(remaining, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        # Спецсимвол \r возвращает каретку в начало строки, стирая прошлый текст
+        print(f"\r⏳ До следующего обновления осталось: {hours:02d} ч. {minutes:02d} мин. {seconds:02d} сек.", end="",
+              flush=True)
+        time.sleep(1)
+    print("\r" + " " * 60 + "\r", end="", flush=True)  # Очищаем строку перед выводом новых логов
+
+
 def main():
     log_message("Сервис автоматизации hh.ru успешно запущен.")
 
-    # Автоматическая загрузка Chromium при первом старте на любом ПК
     try:
         browsers_dir = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
         if not os.path.exists(browsers_dir) or not os.listdir(browsers_dir):
@@ -192,27 +203,24 @@ def main():
         status, wait_seconds = check_and_lift_resumes()
 
         if status:
-            # Если что-то обновили — засыпаем на короткие 10 минут (600 сек),
-            # чтобы проверить остальные резюме из списка, которые могут быть на подходе
             sleep_time = 600
             log_message(f"Часть резюме обновлена. Краткий сон перед проверкой остальных: {sleep_time} сек.")
         elif wait_seconds is not None and wait_seconds > 0:
-            # Спим до разблокировки ближайшего резюме + 60 секунд запаса безопасности
             sleep_time = wait_seconds + 60
             minutes = sleep_time // 60
-            log_message(f"Умный мульти-сон: засыпаю на {minutes} мин. ({sleep_time} сек.) до ближайшей разблокировки.")
+            log_message(f"Умный мульти-сон: рассчитано время ожидания ({minutes} мин).")
         else:
-            # Ошибка парсинга или недоступность сайта — берем резерв из файла конфигурации
             try:
                 config = load_config()
                 sleep_time = int(config["SETTINGS"]["fallback_interval_seconds"])
                 log_message(
                     f"[Защита] Не удалось определить время. Применяем интервал из config.ini: {sleep_time} сек.")
             except Exception:
-                sleep_time = 14400  # Стандартные 4 часа, если конфиг сломан
+                sleep_time = 14400
                 log_message(f"[Защита] Ошибка чтения конфига. Применяем аварийный сон: {sleep_time} сек.")
 
-        time.sleep(sleep_time)
+        # Запускаем живой отсчет времени в консоли
+        console_countdown(sleep_time)
 
 
 if __name__ == "__main__":
