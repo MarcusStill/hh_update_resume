@@ -30,7 +30,6 @@ def log_message(message, newline=True):
     if newline:
         print(full_message)
     else:
-        # Вывод без переноса строки (для тикающего таймера)
         print(full_message, end="", flush=True)
 
     try:
@@ -174,20 +173,35 @@ def check_and_lift_resumes():
 
 
 def console_countdown(sleep_time):
-    """Каждую секунду обновляет одну и ту же строку в консоли, показывая остаток времени."""
-    for remaining in range(sleep_time, 0, -1):
-        hours, remainder = divmod(remaining, 3600)
+    """Таймер обратного отсчета по системным часам ПК."""
+    end_time = datetime.now() + timedelta(seconds=sleep_time)
+
+    while True:
+        now = datetime.now()
+        remaining = end_time - now
+        remaining_seconds = int(remaining.total_seconds())
+
+        if remaining_seconds <= 0:
+            break
+
+        hours, remainder = divmod(remaining_seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
-        # Спецсимвол \r возвращает каретку в начало строки, стирая прошлый текст
+
+        # Выводим тикающую строчку с перезаписью (\r)
         print(f"\r⏳ До следующего обновления осталось: {hours:02d} ч. {minutes:02d} мин. {seconds:02d} сек.", end="",
               flush=True)
-        time.sleep(1)
-    print("\r" + " " * 60 + "\r", end="", flush=True)  # Очищаем строку перед выводом новых логов
+        time.sleep(0.5)
+
+    print("\r" + " " * 70 + "\r", end="", flush=True)  # Очищаем строку логов
 
 
 def main():
     log_message("Сервис автоматизации hh.ru успешно запущен.")
 
+    # Счетчик последовательных ошибок подряд
+    consecutive_errors = 0
+
+    # Автоматическая загрузка Chromium при первом старте на любом ПК
     try:
         browsers_dir = os.environ["PLAYWRIGHT_BROWSERS_PATH"]
         if not os.path.exists(browsers_dir) or not os.listdir(browsers_dir):
@@ -203,35 +217,46 @@ def main():
         status, wait_seconds = check_and_lift_resumes()
 
         if status:
-            # После успешного поднятия берем интервал из config.ini
+            # Сброс ошибок при успешном поднятии
+            consecutive_errors = 0
             try:
                 config = load_config()
                 sleep_time = int(config["SETTINGS"]["check_interval_seconds"])
                 log_message(f"[Успех] Резюме обновлено. Плановый сон из config.ini: {sleep_time} сек.")
             except Exception:
-                # Если параметр называется по-другому или отсутствует
-                try:
-                    sleep_time = int(config["SETTINGS"]["fallback_interval_seconds"])
-                    log_message(f"[Успех] Резюме обновлено. Сон по fallback интервалу: {sleep_time} сек.")
-                except Exception:
-                    sleep_time = 14400  # 4 часа аварийный дефолт
-                    log_message(f"[Успех] Ошибка конфига. Аварийный сон: {sleep_time} сек.")
+                sleep_time = 14400
+                log_message("[Успех] Ошибка конфига. Аварийный сон: 14400 сек.")
 
         elif wait_seconds is not None and wait_seconds > 0:
+            # Сброс ошибок: сайт ответил корректно, просто кнопка заблокирована
+            consecutive_errors = 0
             sleep_time = wait_seconds + 60
             minutes = sleep_time // 60
-            log_message(f"Умный мульти-сон: рассчитано время ожидания ({minutes} мин).")
-        else:
-            try:
-                config = load_config()
-                sleep_time = int(config["SETTINGS"]["fallback_interval_seconds"])
-                log_message(
-                    f"[Защита] Не удалось определить время. Применяем интервал из config.ini: {sleep_time} сек.")
-            except Exception:
-                sleep_time = 14400
-                log_message(f"[Защита] Ошибка чтения конфига. Применяем аварийный сон: {sleep_time} сек.")
+            log_message(f"Сон: рассчитано время ожидания ({minutes} мин).")
 
-        # Запускаем живой отсчет времени в консоли
+        else:
+            # Произошла ошибка (функция вернула wait_seconds=None)
+            consecutive_errors += 1
+
+            if consecutive_errors < 3:
+                sleep_time = 300  # Быстрая перепроверка через 5 минут
+                log_message(
+                    f"[Сбой #{consecutive_errors}] Ошибка сети или структуры сайта. Быстрая перепроверка через 5 минут ({sleep_time} сек)...")
+            else:
+                # Если упало 3 раза подряд — уходим в тяжелый сон из конфигурации
+                try:
+                    config = load_config()
+                    sleep_time = int(config["SETTINGS"]["fallback_interval_seconds"])
+                    log_message(
+                        f"[Критический сбой] Ошибка повторилась 3 раза подряд. Включаем резервное ожидание из config.ini: {sleep_time} сек.")
+                except Exception:
+                    sleep_time = 14400
+                    log_message(f"[Защита] Ошибка чтения конфига. Применяем аварийный сон: {sleep_time} сек.")
+
+                # Сбрасываем счетчик после длинного сна, чтобы начать заново с коротких попыток
+                consecutive_errors = 0
+
+        # Запускаем точный отсчет времени в консоли
         console_countdown(sleep_time)
 
 
