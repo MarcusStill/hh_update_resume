@@ -14,7 +14,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -26,7 +26,7 @@ else:
 
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(BASE_DIR / "pw-browsers")
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 # ------------------------------------------------------------
 # Конфигурация
@@ -176,71 +176,75 @@ def signal_handler(sig, frame):
 def perform_auth(p, max_attempts=3):
     for attempt in range(1, max_attempts + 1):
         logger.info(f"Попытка авторизации #{attempt} из {max_attempts}")
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context()
-        page = context.new_page()
-        page.goto("https://hh.ru")
-        logger.info("Пожалуйста, войдите в аккаунт в открывшемся окне. Таймаут 3 минуты.")
+        browser = None
+        context = None
+        try:
+            browser = p.chromium.launch(headless=False)
+            context = browser.new_context()
+            page = context.new_page()
+            page.goto("https://hh.ru")
+            logger.info("Пожалуйста, войдите в аккаунт в открывшемся окне. Таймаут 3 минуты.")
 
-        auth_success = False
-        start_time = time.time()
-        while time.time() - start_time < 180:
-            try:
-                current_url = page.url.lower()
-                if "login" not in current_url and "hh.ru" in current_url:
-                    # Проверяем элементы
-                    try:
-                        if (page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or
-                                page.locator('button:has-text("Выйти")').count() > 0):
-                            auth_success = True
-                            break
-                    except Exception:
-                        # Если селекторы не сработали, пробуем проверить текст страницы
-                        try:
-                            body = page.locator("body").inner_text(timeout=2000)
-                            if "Мои резюме" in body or "Отклики" in body or "Выйти" in body:
-                                auth_success = True
-                                break
-                        except Exception:
-                            pass
-            except Exception:
-                logger.warning("Окно авторизации было закрыто.")
-                break
-            time.sleep(2)
+            auth_success = False
+            start_time = time.time()
+            while time.time() - start_time < 180:
+                try:
+                    # Проверяем наличие элементов авторизованного пользователя
+                    if (page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or
+                            page.locator('button:has-text("Выйти")').count() > 0):
+                        auth_success = True
+                        break
+                except Exception:
+                    # Если окно закрыто или ошибка, выходим
+                    logger.warning("Окно авторизации было закрыто или ошибка.")
+                    break
+                time.sleep(2)
 
-        if not auth_success:
-            # Финальная проверка перед выходом
-            try:
-                body = page.locator("body").inner_text(timeout=3000)
-                if "Мои резюме" in body or "Отклики" in body or "Выйти" in body:
-                    auth_success = True
-            except:
-                pass
+            # Если селекторы не сработали, проверяем текст страницы
+            if not auth_success:
+                try:
+                    body = page.locator("body").inner_text(timeout=5000)
+                    if any(keyword in body for keyword in ("Мои резюме", "Отклики", "Выйти")):
+                        auth_success = True
+                except Exception:
+                    pass
 
-        if auth_success:
-            logger.info("Авторизация подтверждена. Сохраняем сессию...")
-            context.storage_state(path=str(AUTH_STATE_FILE))
-            # Явно закрываем контекст и браузер
-            try:
-                context.close()
-            except Exception:
-                pass
-            browser.close()
-            logger.info("Сессия сохранена в auth_state.json")
-            return True
-        else:
-            logger.warning(
-                "Не удалось подтвердить авторизацию. Возможно, вход не выполнен или страница загрузилась некорректно.")
-            try:
-                context.close()
-            except Exception:
-                pass
-            browser.close()
-            if attempt < max_attempts:
-                logger.info("Повторная попытка через 10 секунд...")
-                time.sleep(10)
+            if auth_success:
+                logger.info("Авторизация подтверждена. Сохраняем сессию...")
+                context.storage_state(path=str(AUTH_STATE_FILE))
+                try:
+                    if context:
+                        context.close()
+                except Exception:
+                    pass
+                try:
+                    if browser:
+                        browser.close()
+                except Exception:
+                    pass
+                logger.info("Сессия сохранена в auth_state.json")
+                return True
             else:
-                logger.error("Все попытки авторизации исчерпаны.")
+                logger.warning("Не удалось подтвердить авторизацию. Возможно, вход не выполнен.")
+        except Exception as e:
+            logger.error(f"Ошибка при авторизации: {e}")
+        finally:
+            try:
+                if context:
+                    context.close()
+            except Exception:
+                pass
+            try:
+                if browser:
+                    browser.close()
+            except Exception:
+                pass
+
+        if attempt < max_attempts:
+            logger.info("Повторная попытка через 10 секунд...")
+            time.sleep(10)
+        else:
+            logger.error("Все попытки авторизации исчерпаны.")
     return False
 
 
@@ -399,7 +403,22 @@ def check_and_lift_resumes():
                 return False, None
 
         browser_instance = p.chromium.launch(headless=True)
-        context = browser_instance.new_context(storage_state=str(AUTH_STATE_FILE))
+        # Попытка создания контекста с обработкой повреждённого файла
+        try:
+            context = browser_instance.new_context(storage_state=str(AUTH_STATE_FILE))
+        except (PlaywrightError, Exception) as e:
+            logger.warning(f"Повреждена сессия: {e}. Удаляю auth_state.json.")
+            try:
+                AUTH_STATE_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                browser_instance.close()
+            except Exception:
+                pass
+            browser_instance = None
+            return False, None
+
         page = context.new_page()
 
         for name, url in valid_resumes:
@@ -519,15 +538,6 @@ def main():
                 consecutive_errors = 0
 
         console_countdown(sleep_time)
-
-    # Если вышли по сигналу, закроем браузер, если он ещё открыт
-    global browser_instance
-    if browser_instance:
-        try:
-            browser_instance.close()
-        except:
-            pass
-        browser_instance = None
 
     logger.info("Сервис остановлен.")
     remove_pid_file()
