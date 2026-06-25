@@ -14,7 +14,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -181,32 +181,33 @@ def perform_auth(p, max_attempts=3):
         page = context.new_page()
         page.goto("https://hh.ru")
         logger.info("Пожалуйста, войдите в аккаунт в открывшемся окне. Таймаут 3 минуты.")
-        try:
-            page.wait_for_url(lambda u: "hh.ru" in u and "login" not in u, timeout=180000)
-        except Exception as e:
-            logger.error(f"Таймаут ожидания смены URL: {e}")
-            browser.close()
-            time.sleep(10)
-            continue
 
-        auth_ok = False
-        try:
-            if page.locator('a[data-qa="mainmenu_resumes"]').count() > 0:
-                auth_ok = True
-            elif page.locator('button:has-text("Выйти")').count() > 0:
-                auth_ok = True
-            else:
-                page.wait_for_selector('a[data-qa="mainmenu_resumes"]', timeout=30000)
-                auth_ok = True
-        except Exception:
+        # Ждём, пока URL перестанет содержать login, с дополнительной проверкой по элементам
+        auth_success = False
+        start_time = time.time()
+        while time.time() - start_time < 180:
+            # Проверяем URL
+            if "login" not in page.url.lower() and "hh.ru" in page.url.lower():
+                # Дополнительная проверка: появился ли элемент авторизованного пользователя
+                try:
+                    if page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or \
+                            page.locator('button:has-text("Выйти")').count() > 0:
+                        auth_success = True
+                        break
+                except:
+                    pass
+            time.sleep(2)
+
+        if not auth_success:
+            # Если не дождались, попробуем ещё раз проверить элементы
             try:
-                body = page.inner_text("body")
-                if "Мои резюме" in body or "Выйти" in body:
-                    auth_ok = True
+                if page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or \
+                        page.locator('button:has-text("Выйти")').count() > 0:
+                    auth_success = True
             except:
                 pass
 
-        if auth_ok:
+        if auth_success:
             logger.info("Авторизация подтверждена. Сохраняем сессию...")
             context.storage_state(path=str(AUTH_STATE_FILE))
             browser.close()
@@ -405,16 +406,27 @@ def check_and_lift_resumes():
 
 
 # ------------------------------------------------------------
-# Обратный отсчёт с мгновенным завершением
+# Обратный отсчёт с обновлением раз в 5 секунд
 # ------------------------------------------------------------
 def console_countdown(sleep_time):
-    remaining = sleep_time
-    while not should_exit and remaining > 0:
-        hours, rem = divmod(int(remaining), 3600)
+    end_time = time.time() + sleep_time
+    while not should_exit:
+        remaining = int(end_time - time.time())
+        if remaining <= 0:
+            break
+        hours, rem = divmod(remaining, 3600)
         minutes, _ = divmod(rem, 60)
-        print(f"\r⏳ До следующей проверки: {hours:02d}ч {minutes:02d}мин  ", end="", flush=True)
-        time.sleep(1)
-        remaining -= 1
+        print(
+            f"\r⏳ До следующей проверки: "
+            f"{hours:02d}ч {minutes:02d}мин  ",
+            end="",
+            flush=True
+        )
+        # Проверяем завершение каждые 5 секунд
+        for _ in range(min(5, remaining)):
+            if should_exit:
+                break
+            time.sleep(1)
     print("\r" + " " * 50 + "\r", end="", flush=True)
 
 
