@@ -14,7 +14,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.5.0"
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -87,7 +87,7 @@ def ensure_browser_installed():
         if chrome_exe.exists():
             return False
 
-    logger.info("Проверка браузера.")
+    logger.info("Проверка наличия браузера.")
 
     def install():
         from playwright.__main__ import main as playwright_main
@@ -163,14 +163,11 @@ should_exit = False
 
 
 def signal_handler(sig, frame):
+    """Обработчик сигналов - только устанавливает флаг выхода."""
     global should_exit
     logger.info("Получен сигнал завершения. Останавливаемся...")
     should_exit = True
-    if browser_instance:
-        try:
-            browser_instance.close()
-        except:
-            pass
+    # Не закрываем браузер здесь, чтобы избежать конфликтов с основным потоком
 
 
 # ------------------------------------------------------------
@@ -191,23 +188,31 @@ def perform_auth(p, max_attempts=3):
             try:
                 current_url = page.url.lower()
                 if "login" not in current_url and "hh.ru" in current_url:
+                    # Проверяем элементы
                     try:
                         if (page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or
                                 page.locator('button:has-text("Выйти")').count() > 0):
                             auth_success = True
                             break
                     except Exception:
-                        pass
+                        # Если селекторы не сработали, пробуем проверить текст страницы
+                        try:
+                            body = page.locator("body").inner_text(timeout=2000)
+                            if "Мои резюме" in body or "Отклики" in body or "Выйти" in body:
+                                auth_success = True
+                                break
+                        except Exception:
+                            pass
             except Exception:
                 logger.warning("Окно авторизации было закрыто.")
                 break
             time.sleep(2)
 
         if not auth_success:
-            # Попробуем финальную проверку элементов
+            # Финальная проверка перед выходом
             try:
-                if (page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or
-                        page.locator('button:has-text("Выйти")').count() > 0):
+                body = page.locator("body").inner_text(timeout=3000)
+                if "Мои резюме" in body or "Отклики" in body or "Выйти" in body:
                     auth_success = True
             except:
                 pass
@@ -215,12 +220,21 @@ def perform_auth(p, max_attempts=3):
         if auth_success:
             logger.info("Авторизация подтверждена. Сохраняем сессию...")
             context.storage_state(path=str(AUTH_STATE_FILE))
+            # Явно закрываем контекст и браузер
+            try:
+                context.close()
+            except Exception:
+                pass
             browser.close()
             logger.info("Сессия сохранена в auth_state.json")
             return True
         else:
             logger.warning(
                 "Не удалось подтвердить авторизацию. Возможно, вход не выполнен или страница загрузилась некорректно.")
+            try:
+                context.close()
+            except Exception:
+                pass
             browser.close()
             if attempt < max_attempts:
                 logger.info("Повторная попытка через 10 секунд...")
@@ -380,6 +394,7 @@ def check_and_lift_resumes():
         global browser_instance
 
         if not AUTH_STATE_FILE.exists():
+            logger.warning("Сессия отсутствует. Требуется повторная авторизация.")
             if not perform_auth(p):
                 return False, None
 
@@ -396,7 +411,8 @@ def check_and_lift_resumes():
             elif wait_sec is not None:
                 wait_times.append(wait_sec)
 
-        # Явное закрытие контекста и браузера
+        # Браузер будет закрыт в основном цикле, но если выходим по should_exit,
+        # закроем здесь, чтобы не оставлять висячих процессов.
         try:
             context.close()
         except Exception:
@@ -503,6 +519,15 @@ def main():
                 consecutive_errors = 0
 
         console_countdown(sleep_time)
+
+    # Если вышли по сигналу, закроем браузер, если он ещё открыт
+    global browser_instance
+    if browser_instance:
+        try:
+            browser_instance.close()
+        except:
+            pass
+        browser_instance = None
 
     logger.info("Сервис остановлен.")
     remove_pid_file()
