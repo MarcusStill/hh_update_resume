@@ -14,7 +14,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -122,13 +122,13 @@ def is_process_alive(pid):
                     return exit_code.value == 259
                 kernel32.CloseHandle(handle)
             return False
-        except:
+        except Exception:
             return False
     else:
         try:
             os.kill(pid, 0)
             return True
-        except:
+        except Exception:
             return False
 
 
@@ -212,16 +212,6 @@ def perform_auth(p, max_attempts=3):
             if auth_success:
                 logger.info("Авторизация подтверждена. Сохраняем сессию...")
                 context.storage_state(path=str(AUTH_STATE_FILE))
-                try:
-                    if context:
-                        context.close()
-                except Exception:
-                    pass
-                try:
-                    if browser:
-                        browser.close()
-                except Exception:
-                    pass
                 logger.info("Сессия сохранена в auth_state.json")
                 return True
             else:
@@ -330,7 +320,7 @@ def get_resume_status(page, resume_name, url):
             "div:has-text('Можно сегодня в'), div:has-text('Можно завтра в'), div:has-text('Поднятие резюме')")
         if possible_divs.count():
             status_text = possible_divs.last.inner_text()
-    except:
+    except Exception:
         pass
 
     if not status_text:
@@ -403,44 +393,42 @@ def check_and_lift_resumes():
                 return False, None
 
         browser_instance = p.chromium.launch(headless=True)
-        # Попытка создания контекста с обработкой повреждённого файла
+        context = None
         try:
-            context = browser_instance.new_context(storage_state=str(AUTH_STATE_FILE))
-        except (PlaywrightError, Exception) as e:
-            logger.warning(f"Повреждена сессия: {e}. Удаляю auth_state.json.")
             try:
-                AUTH_STATE_FILE.unlink(missing_ok=True)
+                context = browser_instance.new_context(storage_state=str(AUTH_STATE_FILE))
+            except (PlaywrightError, Exception) as e:
+                logger.warning(f"Повреждена сессия: {e}. Удаляю auth_state.json.")
+                try:
+                    AUTH_STATE_FILE.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return False, None
+
+            page = context.new_page()
+
+            for name, url in valid_resumes:
+                if should_exit:
+                    break
+                success, wait_sec = get_resume_status(page, name, url)
+                if success:
+                    any_success = True
+                elif wait_sec is not None:
+                    wait_times.append(wait_sec)
+
+        finally:
+            # Гарантированное закрытие ресурсов
+            try:
+                if context:
+                    context.close()
             except Exception:
                 pass
             try:
-                browser_instance.close()
+                if browser_instance:
+                    browser_instance.close()
             except Exception:
                 pass
             browser_instance = None
-            return False, None
-
-        page = context.new_page()
-
-        for name, url in valid_resumes:
-            if should_exit:
-                break
-            success, wait_sec = get_resume_status(page, name, url)
-            if success:
-                any_success = True
-            elif wait_sec is not None:
-                wait_times.append(wait_sec)
-
-        # Браузер будет закрыт в основном цикле, но если выходим по should_exit,
-        # закроем здесь, чтобы не оставлять висячих процессов.
-        try:
-            context.close()
-        except Exception:
-            pass
-        try:
-            browser_instance.close()
-        except Exception:
-            pass
-        browser_instance = None
 
     if any_success:
         return True, None
