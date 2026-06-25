@@ -14,7 +14,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -87,15 +87,18 @@ def ensure_browser_installed():
         if chrome_exe.exists():
             return False
 
-    logger.info("Браузер не найден. Начинаю скачивание Chromium...")
+    logger.info("Проверка браузера.")
 
     def install():
         from playwright.__main__ import main as playwright_main
-        sys.argv = ["playwright", "install", "chromium"]
+        old_argv = sys.argv.copy()
         try:
+            sys.argv = ["playwright", "install", "chromium"]
             playwright_main()
         except SystemExit:
             pass
+        finally:
+            sys.argv = old_argv
 
     thread = threading.Thread(target=install)
     thread.start()
@@ -182,27 +185,29 @@ def perform_auth(p, max_attempts=3):
         page.goto("https://hh.ru")
         logger.info("Пожалуйста, войдите в аккаунт в открывшемся окне. Таймаут 3 минуты.")
 
-        # Ждём, пока URL перестанет содержать login, с дополнительной проверкой по элементам
         auth_success = False
         start_time = time.time()
         while time.time() - start_time < 180:
-            # Проверяем URL
-            if "login" not in page.url.lower() and "hh.ru" in page.url.lower():
-                # Дополнительная проверка: появился ли элемент авторизованного пользователя
-                try:
-                    if page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or \
-                            page.locator('button:has-text("Выйти")').count() > 0:
-                        auth_success = True
-                        break
-                except:
-                    pass
+            try:
+                current_url = page.url.lower()
+                if "login" not in current_url and "hh.ru" in current_url:
+                    try:
+                        if (page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or
+                                page.locator('button:has-text("Выйти")').count() > 0):
+                            auth_success = True
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                logger.warning("Окно авторизации было закрыто.")
+                break
             time.sleep(2)
 
         if not auth_success:
-            # Если не дождались, попробуем ещё раз проверить элементы
+            # Попробуем финальную проверку элементов
             try:
-                if page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or \
-                        page.locator('button:has-text("Выйти")').count() > 0:
+                if (page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or
+                        page.locator('button:has-text("Выйти")').count() > 0):
                     auth_success = True
             except:
                 pass
@@ -247,8 +252,13 @@ def get_resume_status(page, resume_name, url):
     else:
         return False, None
 
+    # Проверка на редирект на логин – автоматическое удаление сессии
     if any(marker in page.url.lower() for marker in ("/login", "/auth", "account/login", "oauth/authorize")):
-        logger.warning("Сессия устарела. Удалите auth_state.json и перезапустите.")
+        logger.warning("Сессия устарела. Удаляю auth_state.json.")
+        try:
+            AUTH_STATE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
         return False, None
 
     button_selector = 'button[data-qa="resume-update-button"]'
