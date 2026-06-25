@@ -1,14 +1,18 @@
+import atexit
+import base64
 import configparser
+import hashlib
+import json
+import logging
 import os
 import re
-import sys
-import time
 import signal
+import socket
+import sys
 import threading
-import atexit
-import logging
-from logging.handlers import RotatingFileHandler
+import time
 from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # ------------------------------------------------------------
@@ -40,7 +44,7 @@ PID_FILE = BASE_DIR / "hh_autoupdater.pid"
 logger = logging.getLogger("hh_updater")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
-    handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
@@ -48,6 +52,51 @@ if not logger.handlers:
     console.setFormatter(formatter)
     logger.addHandler(console)
 
+# ------------------------------------------------------------
+# Обфускация данных
+# ------------------------------------------------------------
+def _get_obfuscation_key() -> int:
+    hostname = socket.gethostname()
+    salt = "HH_AUTO_UPDATER_2024"
+    combined = (hostname + salt).encode('utf-8')
+    hash_bytes = hashlib.sha256(combined).digest()[:4]
+    return int.from_bytes(hash_bytes, byteorder='big')
+
+def obfuscate_data(data: dict) -> str:
+    key = _get_obfuscation_key() & 0xFF
+    json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+    obfuscated = ''.join(chr(ord(c) ^ key) for c in json_str)
+    return base64.b64encode(obfuscated.encode('utf-8')).decode('ascii')
+
+def deobfuscate_data(obfuscated_str: str) -> dict:
+    key = _get_obfuscation_key() & 0xFF
+    try:
+        decoded = base64.b64decode(obfuscated_str.encode('ascii')).decode('utf-8')
+        json_str = ''.join(chr(ord(c) ^ key) for c in decoded)
+        return json.loads(json_str)
+    except Exception as e:
+        raise ValueError(f"Не удалось деобфусцировать данные: {e}")
+
+def save_auth_state(context, path: Path) -> None:
+    try:
+        auth_data = context.storage_state()
+        obfuscated = obfuscate_data(auth_data)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(obfuscated)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения сессии: {e}")
+        raise
+
+def load_auth_state(path: Path) -> dict:
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            obfuscated = f.read().strip()
+        if not obfuscated:
+            raise ValueError("Файл сессии пуст")
+        return deobfuscate_data(obfuscated)
+    except Exception as e:
+        logger.warning(f"Ошибка загрузки сессии: {e}")
+        raise
 
 # ------------------------------------------------------------
 # Вспомогательные функции
@@ -211,7 +260,8 @@ def perform_auth(p, max_attempts=3):
 
             if auth_success:
                 logger.info("Авторизация подтверждена. Сохраняем сессию...")
-                context.storage_state(path=str(AUTH_STATE_FILE))
+                # Сохраняем с обфускацией
+                save_auth_state(context, AUTH_STATE_FILE)
                 logger.info("Сессия сохранена в auth_state.json")
                 return True
             else:
@@ -237,6 +287,23 @@ def perform_auth(p, max_attempts=3):
             logger.error("Все попытки авторизации исчерпаны.")
     return False
 
+
+# ------------------------------------------------------------
+# Проверка авторизации для загруженной сессии
+# ------------------------------------------------------------
+def is_user_authorized(page) -> bool:
+    """Упрощённая проверка для загруженной сессии."""
+    try:
+        if (page.locator('a[data-qa="mainmenu_resumes"]').count() > 0 or
+                page.locator('button:has-text("Выйти")').count() > 0):
+            return True
+        # Проверка текста
+        body = page.locator("body").inner_text(timeout=3000)
+        if any(keyword in body for keyword in ("Мои резюме", "Отклики", "Выйти")):
+            return True
+        return False
+    except Exception:
+        return False
 
 # ------------------------------------------------------------
 # Основная логика поднятия резюме
@@ -368,7 +435,9 @@ def get_resume_status(page, resume_name, url):
             logger.warning(f"Формат времени не распознан: {clean_text}")
             return False, None
 
-
+# ------------------------------------------------------------
+# Проверка резюме
+# ------------------------------------------------------------
 def check_and_lift_resumes():
     config = load_config()
     if not config.has_section("RESUMES"):
@@ -396,16 +465,37 @@ def check_and_lift_resumes():
         context = None
         try:
             try:
-                context = browser_instance.new_context(storage_state=str(AUTH_STATE_FILE))
+                auth_data = load_auth_state(AUTH_STATE_FILE)
+                context = browser_instance.new_context(storage_state=auth_data)
             except (PlaywrightError, Exception) as e:
-                logger.warning(f"Повреждена сессия: {e}. Удаляю auth_state.json.")
+                logger.warning(f"Повреждена сессия: {e}. Удаляю auth_state.json и запрашиваю новую.")
                 try:
                     AUTH_STATE_FILE.unlink(missing_ok=True)
                 except Exception:
                     pass
-                return False, None
+                if not perform_auth(p):
+                    return False, None
+                auth_data = load_auth_state(AUTH_STATE_FILE)
+                context = browser_instance.new_context(storage_state=auth_data)
 
             page = context.new_page()
+
+            # Проверяем, что сессия действительна
+            try:
+                page.goto("https://hh.ru", wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(2000)
+                if not is_user_authorized(page):
+                    logger.warning("Сессия недействительна. Удаляю auth_state.json и запрашиваю новую.")
+                    AUTH_STATE_FILE.unlink(missing_ok=True)
+                    if not perform_auth(p):
+                        return False, None
+                    # Обновляем контекст после новой авторизации
+                    auth_data = load_auth_state(AUTH_STATE_FILE)
+                    context = browser_instance.new_context(storage_state=auth_data)
+                    page = context.new_page()
+            except Exception as e:
+                logger.error(f"Ошибка при проверке сессии: {e}")
+                return False, None
 
             for name, url in valid_resumes:
                 if should_exit:
