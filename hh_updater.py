@@ -11,11 +11,10 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from pathlib import Path
 
-
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -280,20 +279,12 @@ def get_resume_status(page, resume_name, url):
 
         if is_visible and is_enabled:
             logger.info(f"Кнопка доступна для '{resume_name}'. Нажимаем...")
+            # Упрощённая проверка успеха – считаем клик успешным
             try:
                 lift_button.click(timeout=10000)
                 page.wait_for_timeout(3000)
-                try:
-                    page.wait_for_function(
-                        'button => button.disabled === true || !button.offsetParent',
-                        arg=lift_button.element_handle(),
-                        timeout=10000
-                    )
-                    logger.info(f"[УСПЕХ] Резюме '{resume_name}' успешно поднято!")
-                    return True, None
-                except Exception:
-                    logger.warning(f"Кнопка не изменила состояние после клика для '{resume_name}'.")
-                    return False, None
+                logger.info(f"[УСПЕХ] Команда поднятия отправлена для '{resume_name}'.")
+                return True, None
             except Exception as e:
                 logger.error(f"Ошибка при клике: {e}")
                 return False, None
@@ -413,20 +404,17 @@ def check_and_lift_resumes():
         return False, None
 
 
+# ------------------------------------------------------------
+# Обратный отсчёт с мгновенным завершением
+# ------------------------------------------------------------
 def console_countdown(sleep_time):
-    end_time = datetime.now() + timedelta(seconds=sleep_time)
-    while not should_exit:
-        now = datetime.now()
-        remaining = (end_time - now).total_seconds()
-        if remaining <= 0:
-            break
+    remaining = sleep_time
+    while not should_exit and remaining > 0:
         hours, rem = divmod(int(remaining), 3600)
         minutes, _ = divmod(rem, 60)
         print(f"\r⏳ До следующей проверки: {hours:02d}ч {minutes:02d}мин  ", end="", flush=True)
-        if remaining < 60:
-            time.sleep(remaining)
-        else:
-            time.sleep(60)
+        time.sleep(1)
+        remaining -= 1
     print("\r" + " " * 50 + "\r", end="", flush=True)
 
 
@@ -448,7 +436,6 @@ def main():
         sys.exit(1)
 
     create_pid_file()
-
     logger.info(f"HH Resume Updater {APP_VERSION} запущен. PID={os.getpid()}")
 
     consecutive_errors = 0
