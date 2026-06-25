@@ -5,10 +5,17 @@ import sys
 import time
 import signal
 import threading
+import atexit
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 from pathlib import Path
+
+
+# ------------------------------------------------------------
+# Версия приложения
+# ------------------------------------------------------------
+APP_VERSION = "2.1.0"
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -70,12 +77,14 @@ def load_config():
 def ensure_browser_installed():
     """Устанавливает браузер через отдельный поток, если отсутствует."""
     browsers_dir = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
-    chromium_dirs = list(browsers_dir.glob("chromium-*"))
+    # Сортировка и взятие последней версии
+    chromium_dirs = sorted(browsers_dir.glob("chromium-*"))
     if chromium_dirs:
+        chromium_dir = chromium_dirs[-1]  # берём последнюю (самую свежую)
         if sys.platform == "win32":
-            chrome_exe = chromium_dirs[0] / "chrome-win" / "chrome.exe"
+            chrome_exe = chromium_dir / "chrome-win" / "chrome.exe"
         else:
-            chrome_exe = chromium_dirs[0] / "chrome-linux" / "chrome"
+            chrome_exe = chromium_dir / "chrome-linux" / "chrome"
         if chrome_exe.exists():
             return False
 
@@ -121,22 +130,30 @@ def is_process_alive(pid):
             return False
 
 
+# Обработка PID-файла
 def create_pid_file():
     if PID_FILE.exists():
-        with open(PID_FILE, "r") as f:
-            old_pid = int(f.read().strip())
-        if is_process_alive(old_pid):
-            logger.error(f"Процесс с PID {old_pid} уже запущен. Выход.")
-            sys.exit(1)
-        else:
-            PID_FILE.unlink()
-    with open(PID_FILE, "w") as f:
+        try:
+            with open(PID_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            old_pid = int(content)
+            if is_process_alive(old_pid):
+                logger.error(f"Процесс с PID {old_pid} уже запущен. Выход.")
+                sys.exit(1)
+            PID_FILE.unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Повреждён PID-файл. Выполняю восстановление.")
+            PID_FILE.unlink(missing_ok=True)
+    with open(PID_FILE, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
 
 
 def remove_pid_file():
     PID_FILE.unlink(missing_ok=True)
 
+
+# Регистрация очистки при завершении
+atexit.register(remove_pid_file)
 
 # Глобальные переменные для graceful shutdown
 browser_instance = None
@@ -158,7 +175,6 @@ def signal_handler(sig, frame):
 # Авторизация с повторными попытками
 # ------------------------------------------------------------
 def perform_auth(p, max_attempts=3):
-    """Выполняет авторизацию с несколькими попытками."""
     for attempt in range(1, max_attempts + 1):
         logger.info(f"Попытка авторизации #{attempt} из {max_attempts}")
         browser = p.chromium.launch(headless=False)
@@ -166,7 +182,6 @@ def perform_auth(p, max_attempts=3):
         page = context.new_page()
         page.goto("https://hh.ru")
         logger.info("Пожалуйста, войдите в аккаунт в открывшемся окне. Таймаут 3 минуты.")
-        # Ждём, пока URL не перестанет содержать login
         try:
             page.wait_for_url(lambda u: "hh.ru" in u and "login" not in u, timeout=180000)
         except Exception as e:
@@ -175,20 +190,16 @@ def perform_auth(p, max_attempts=3):
             time.sleep(10)
             continue
 
-        # Дополнительная проверка: ищем элемент, характерный для авторизованного пользователя
         auth_ok = False
         try:
-            # Ждём появления пункта меню "Мои резюме" или кнопки "Выйти"
             if page.locator('a[data-qa="mainmenu_resumes"]').count() > 0:
                 auth_ok = True
             elif page.locator('button:has-text("Выйти")').count() > 0:
                 auth_ok = True
             else:
-                # Если не нашли, возможно страница ещё загружается, дадим ещё время
                 page.wait_for_selector('a[data-qa="mainmenu_resumes"]', timeout=30000)
                 auth_ok = True
         except Exception:
-            # Проверим наличие текста "Мои резюме" в любом месте
             try:
                 body = page.inner_text("body")
                 if "Мои резюме" in body or "Выйти" in body:
@@ -220,12 +231,11 @@ def perform_auth(p, max_attempts=3):
 def get_resume_status(page, resume_name, url):
     logger.info(f"Проверка резюме '{resume_name}'...")
 
-    # Переход с повторными попытками
     for attempt in range(3):
         try:
+            # Короткая пауза
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            # Дополнительно ждём, пока страница не загрузится полностью
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_timeout(2000)  # стабилизация DOM
             break
         except Exception as e:
             if attempt == 2:
@@ -237,12 +247,10 @@ def get_resume_status(page, resume_name, url):
     else:
         return False, None
 
-    # Проверка на редирект на логин
     if any(marker in page.url.lower() for marker in ("/login", "/auth", "account/login", "oauth/authorize")):
         logger.warning("Сессия устарела. Удалите auth_state.json и перезапустите.")
         return False, None
 
-    # Поиск кнопки поднятия
     button_selector = 'button[data-qa="resume-update-button"]'
     fallback_selectors = [
         'button:has-text("Поднять в поиске")',
@@ -257,7 +265,6 @@ def get_resume_status(page, resume_name, url):
             break
 
     if lift_button:
-        # Проверяем видимость и доступность с явными таймаутами (5 секунд)
         is_visible = False
         is_enabled = False
         try:
@@ -274,12 +281,9 @@ def get_resume_status(page, resume_name, url):
         if is_visible and is_enabled:
             logger.info(f"Кнопка доступна для '{resume_name}'. Нажимаем...")
             try:
-                lift_button.click()
-                # Ждём, чтобы кнопка изменила состояние
+                lift_button.click(timeout=10000)
                 page.wait_for_timeout(3000)
-                # Проверяем, что кнопка стала неактивной или исчезла
                 try:
-                    # Ждём, пока кнопка исчезнет или станет disabled
                     page.wait_for_function(
                         'button => button.disabled === true || !button.offsetParent',
                         arg=lift_button.element_handle(),
@@ -298,7 +302,7 @@ def get_resume_status(page, resume_name, url):
     else:
         logger.info(f"Кнопка не найдена для '{resume_name}'. Ищем информацию о времени...")
 
-    # -------------------- Поиск времени следующего поднятия --------------------
+    # Поиск времени следующего поднятия
     time_pattern = re.compile(r"(сегодня|завтра)\s+в\s+(\d{2}):(\d{2})", re.IGNORECASE)
     status_text = ""
     try:
@@ -310,7 +314,11 @@ def get_resume_status(page, resume_name, url):
         pass
 
     if not status_text:
-        body_text = page.locator("body").inner_text()
+        # Безопасное получение текста body
+        try:
+            body_text = page.locator("body").inner_text(timeout=5000)
+        except Exception:
+            body_text = ""
         match = time_pattern.search(body_text)
         if match:
             day_word = match.group(1).lower()
@@ -369,12 +377,10 @@ def check_and_lift_resumes():
     with sync_playwright() as p:
         global browser_instance
 
-        # Если нет сессии – запускаем авторизацию
         if not AUTH_STATE_FILE.exists():
             if not perform_auth(p):
                 return False, None
 
-        # Основной проход в headless-режиме
         browser_instance = p.chromium.launch(headless=True)
         context = browser_instance.new_context(storage_state=str(AUTH_STATE_FILE))
         page = context.new_page()
@@ -388,7 +394,15 @@ def check_and_lift_resumes():
             elif wait_sec is not None:
                 wait_times.append(wait_sec)
 
-        browser_instance.close()
+        # Явное закрытие контекста и браузера
+        try:
+            context.close()
+        except Exception:
+            pass
+        try:
+            browser_instance.close()
+        except Exception:
+            pass
         browser_instance = None
 
     if any_success:
@@ -434,10 +448,10 @@ def main():
         sys.exit(1)
 
     create_pid_file()
-    logger.info(f"Сервис автоматизации hh.ru запущен. PID={os.getpid()}")
+
+    logger.info(f"HH Resume Updater {APP_VERSION} запущен. PID={os.getpid()}")
 
     consecutive_errors = 0
-    sleep_time = 14400
 
     while not should_exit:
         try:
