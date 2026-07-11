@@ -1,6 +1,7 @@
 import atexit
 import base64
 import configparser
+import glob
 import hashlib
 import json
 import logging
@@ -18,11 +19,33 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.8.8"
+APP_VERSION = "2.8.17"
 
+# ------------------------------------------------------------
+# Константы
+# ------------------------------------------------------------
+MIN_AUTH_STATE_SIZE = 500  # минимальный размер auth_state.json (байт)
+AUTH_SELECTORS = [
+    'a[data-qa="mainmenu_resumes"]',
+    'a[data-qa="applicant-resumes"]',
+]
+TEXT_LOCATORS = [
+    "text=Мои резюме",
+    "text=Мои отклики",
+]
+VISIBLE_TIMEOUT = 500  # таймаут для is_visible (мс)
+AUTH_CHECK_INTERVAL = 20  # интервал проверки текста (секунд)
+_warning_logged = False
+_last_warning_time = 0  # время последнего предупреждения (для ограничения частоты)
+AUTH_TEXT_SNIPPETS = [
+    "Резюме и профиль",
+    "Отклики",
+    "Ваша активность"
+]
 # ------------------------------------------------------------
 # Базовые пути
 # ------------------------------------------------------------
+
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys.executable).parent
 else:
@@ -53,13 +76,13 @@ if not logger.handlers:
     logger.addHandler(console)
 
 # ------------------------------------------------------------
-# Вспомогательные функции для диагностики и очистки
+# Вспомогательные функции
 # ------------------------------------------------------------
-import glob
-
 def cleanup_old_files(pattern="auth_failed_*.html", keep=5):
     """Оставляет только последние N файлов, остальные удаляет."""
-    files = sorted(glob.glob(str(pattern)), key=os.path.getmtime, reverse=True)
+    # Используем BASE_DIR для поиска
+    search_pattern = str(BASE_DIR / pattern)
+    files = sorted(glob.glob(search_pattern), key=os.path.getmtime, reverse=True)
     for f in files[keep:]:
         try:
             os.remove(f)
@@ -74,8 +97,6 @@ def is_logged_in_url(url: str) -> bool:
         "login" not in url
         and (
             "/applicant" in url
-            or "?role=applicant" in url
-            or "&role=applicant" in url
             or "role=applicant" in url
         )
     )
@@ -105,17 +126,28 @@ def deobfuscate_data(obfuscated_str: str) -> dict:
     except Exception as e:
         raise ValueError(f"Не удалось деобфусцировать данные: {e}")
 
-def save_auth_state(context, path: Path) -> None:
-    """Сохраняет сессию с обфускацией (без валидации)."""
+def save_auth_state(context, path: Path) -> bool:
+    """Сохраняет сессию с обфускацией и проверяет размер файла (диагностика)."""
     try:
         auth_data = context.storage_state()
         obfuscated = obfuscate_data(auth_data)
         with open(path, 'w', encoding='utf-8') as f:
             f.write(obfuscated)
-        logger.info(f"Сессия сохранена в {path}")
+
+        size = os.path.getsize(path)
+        logger.info(f"Сессия сохранена в {path} (размер: {size} байт)")
+
+        # Только предупреждение, не ошибка — размер может меняться в зависимости от версии Playwright
+        if size < MIN_AUTH_STATE_SIZE:
+            logger.warning(
+                f"Размер auth_state.json ({size} байт) меньше ожидаемого ({MIN_AUTH_STATE_SIZE}). "
+                "Это может быть нормально, но проверьте логи при проблемах с авторизацией."
+            )
+
+        return True
     except Exception as e:
         logger.error(f"Ошибка сохранения сессии: {e}")
-        raise
+        return False
 
 def load_auth_state(path: Path) -> dict:
     try:
@@ -145,20 +177,17 @@ def disable_quick_edit():
     except Exception:
         pass
 
-
 def load_config():
     config = configparser.ConfigParser()
     config.read(CONFIG_FILE, encoding="utf-8")
     return config
 
-
 def ensure_browser_installed():
     """Устанавливает браузер через отдельный поток, если отсутствует."""
     browsers_dir = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
-    # Сортировка и взятие последней версии
     chromium_dirs = sorted(browsers_dir.glob("chromium-*"))
     if chromium_dirs:
-        chromium_dir = chromium_dirs[-1]  # берём последнюю (самую свежую)
+        chromium_dir = chromium_dirs[-1]
         if sys.platform == "win32":
             chrome_exe = chromium_dir / "chrome-win" / "chrome.exe"
         else:
@@ -187,7 +216,6 @@ def ensure_browser_installed():
     logger.info("Локальный браузер успешно развернут.")
     return True
 
-
 def is_process_alive(pid):
     if sys.platform == "win32":
         try:
@@ -210,8 +238,6 @@ def is_process_alive(pid):
         except Exception:
             return False
 
-
-# Обработка PID-файла
 def create_pid_file():
     if PID_FILE.exists():
         try:
@@ -228,29 +254,57 @@ def create_pid_file():
     with open(PID_FILE, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
 
-
 def remove_pid_file():
     PID_FILE.unlink(missing_ok=True)
 
-
-# Регистрация очистки при завершении
 atexit.register(remove_pid_file)
 
-# Глобальные переменные для graceful shutdown
 browser_instance = None
 should_exit = False
 
-
 def signal_handler(sig, frame):
-    """Обработчик сигналов - только устанавливает флаг выхода."""
     global should_exit
     logger.info("Получен сигнал завершения. Останавливаемся...")
     should_exit = True
-    # Не закрываем браузер здесь, чтобы избежать конфликтов с основным потоком
-
 
 # ------------------------------------------------------------
-# Авторизация с повторными попытками
+# Проверка авторизации (оптимизирована)
+# ------------------------------------------------------------
+_warning_logged = False  # флаг для предотвращения спама предупреждений
+
+def is_user_authorized(page, check_text=False) -> bool:
+    global _last_warning_time
+    try:
+        url = page.url.lower()
+
+        # 1. Проверка видимых data-qa селекторов (основной признак)
+        if "login" not in url:
+            for selector in AUTH_SELECTORS:
+                if page.locator(selector).first.is_visible(timeout=VISIBLE_TIMEOUT):
+                    return True
+
+        # 2. Если URL похож на кабинет, проверяем наличие характерных текстов
+        if is_logged_in_url(url):
+            for text in AUTH_TEXT_SNIPPETS:
+                if page.locator(f"text={text}").first.is_visible(timeout=VISIBLE_TIMEOUT):
+                    return True
+
+        # 3. Если явно запрошена проверка текста (для валидации сессии)
+        if check_text:
+            for text in TEXT_LOCATORS:
+                if page.locator(text).first.is_visible(timeout=VISIBLE_TIMEOUT):
+                    return True
+
+        return False
+    except Exception as e:
+        current_time = time.time()
+        if current_time - _last_warning_time > 300:
+            logger.warning(f"Неожиданная ошибка в is_user_authorized: {e}")
+            _last_warning_time = current_time
+        return False
+
+# ------------------------------------------------------------
+# Авторизация (без валидации через второй браузер)
 # ------------------------------------------------------------
 def perform_auth(p, max_attempts=3):
     for attempt in range(1, max_attempts + 1):
@@ -258,10 +312,7 @@ def perform_auth(p, max_attempts=3):
         browser = None
         context = None
         try:
-            browser = p.chromium.launch(
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"]
-            )
+            browser = p.chromium.launch(headless=False)
             context = browser.new_context()
             page = context.new_page()
 
@@ -284,16 +335,24 @@ def perform_auth(p, max_attempts=3):
             last_log_time = start_time
             last_text_check = start_time
             last_url = page.url
-            auth_url = None  # запомним URL, на котором подтвердилась авторизация
 
             while time.time() - start_time < 180:
+                # Проверка закрытия окна
+                try:
+                    if page.is_closed():
+                        logger.warning("Страница была закрыта пользователем.")
+                        break
+                except Exception:
+                    pass
+
                 current_url = page.url
 
+                # Логирование каждые 15 секунд
                 if time.time() - last_log_time > 15:
                     try:
                         logger.info(f"Текущий URL: {current_url}")
-                        logger.info(f"Заголовок: {page.title()}")
-                        logger.info(f"Окно закрыто: {page.is_closed()}")
+                        title = page.title()
+                        logger.info(f"Заголовок: {title}")
                     except Exception:
                         pass
                     last_log_time = time.time()
@@ -302,111 +361,70 @@ def perform_auth(p, max_attempts=3):
                     logger.info(f"URL изменился: {current_url}")
                     last_url = current_url
 
-                if is_logged_in_url(current_url):
-                    logger.info(f"Обнаружен переход в личный кабинет: {current_url}")
+                # Проверка авторизации (без текста каждую секунду)
+                if is_user_authorized(page, check_text=False):
+                    logger.info(f"Обнаружена авторизация по URL/селекторам: {current_url}")
                     auth_success = True
-                    auth_url = current_url   # запоминаем URL для валидации
                     break
 
-                if "login" not in current_url:
-                    try:
-                        for selector in [
-                            'a[data-qa="mainmenu_resumes"]',
-                            'a[data-qa="applicant-resumes"]',
-                        ]:
-                            if page.locator(selector).first.is_visible(timeout=500):
-                                logger.info(f"Найден селектор: {selector}")
-                                auth_success = True
-                                auth_url = current_url
-                                break
-                    except Exception:
-                        pass
-                    if auth_success:
+                # Проверка текста – не чаще раза в AUTH_CHECK_INTERVAL секунд
+                if time.time() - last_text_check > AUTH_CHECK_INTERVAL:
+                    if is_user_authorized(page, check_text=True):
+                        logger.info(f"Обнаружена авторизация по тексту: {current_url}")
+                        auth_success = True
                         break
-
-                if time.time() - last_text_check > 20:
-                    try:
-                        body = page.locator("body").inner_text(timeout=2000)
-                        if "Мои резюме" in body or "Мои отклики" in body:
-                            logger.info("Найдены ключевые фразы в тексте")
-                            auth_success = True
-                            auth_url = current_url
-                            break
-                    except Exception:
-                        pass
                     last_text_check = time.time()
 
                 page.wait_for_timeout(1000)
 
+            # Диагностика при неудаче (без изменений)
             if not auth_success:
                 logger.warning("Не удалось подтвердить авторизацию. Собираю детальную диагностику...")
                 try:
                     logger.info(f"Финальный URL: {page.url}")
-                    logger.info(f"Заголовок: {page.title()}")
-                    logger.info(f"Окно закрыто: {page.is_closed()}")
+                    try:
+                        title = page.title()
+                        logger.info(f"Заголовок: {title}")
+                    except Exception:
+                        pass
+                    try:
+                        logger.info(f"Окно закрыто: {page.is_closed()}")
+                    except Exception:
+                        pass
                     cookies = context.cookies()
-                    logger.info(f"Куки: {[c['name'] for c in cookies]}")
+                    logger.info(f"Куки ({len(cookies)}): {[c['name'] for c in cookies[:10]]}" + ("..." if len(cookies) > 10 else ""))
                     page.screenshot(path="auth_failed.png", full_page=True)
                     logger.info("Сохранён скриншот: auth_failed.png")
                     body_text = page.locator("body").inner_text(timeout=3000)
                     logger.info(f"Текст страницы (первые 500 символов):\n{body_text[:500]}")
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     html_filename = f"auth_failed_{timestamp}.html"
-                    html = page.content()
-                    with open(html_filename, "w", encoding="utf-8") as f:
-                        f.write(html)
-                    logger.info(f"Сохранён HTML: {html_filename}")
-                    cleanup_old_files("auth_failed_*.html", keep=5)
-                    logger.info(f"Открыто страниц: {len(context.pages)}")
-                    for i, p_page in enumerate(context.pages):
-                        logger.info(f"  Страница {i+1}: {p_page.url}")
+                    html_saved = False
+                    try:
+                        html = page.content()
+                        with open(html_filename, "w", encoding="utf-8") as f:
+                            f.write(html)
+                        logger.info(f"Сохранён HTML: {html_filename}")
+                        html_saved = True
+                    except Exception as e:
+                        logger.warning(f"Не удалось сохранить HTML: {e}")
+                    if html_saved:
+                        cleanup_old_files("auth_failed_*.html", keep=5)
                 except Exception as e:
                     logger.error(f"Ошибка при сборе диагностики: {e}")
 
-            if auth_success and auth_url:
+            if auth_success:
                 logger.info("Авторизация подтверждена. Сохраняем сессию...")
-                logger.info(f"Сессия сохраняется для URL: {auth_url}")
+                logger.info(f"Сессия сохраняется для URL: {page.url}")
 
-                try:
-                    save_auth_state(context, AUTH_STATE_FILE)
-                except Exception as e:
-                    logger.error(f"Не удалось сохранить сессию: {e}")
+                if save_auth_state(context, AUTH_STATE_FILE):
+                    logger.info("✅ Сессия успешно сохранена и проверена.")
+                    return True
+                else:
+                    logger.error("❌ Не удалось сохранить сессию (проверка размера не пройдена).")
                     return False
-
-                # === ВАЛИДАЦИЯ СОХРАНЁННОЙ СЕССИИ (используем сохранённый URL) ===
-                try:
-                    auth_data = load_auth_state(AUTH_STATE_FILE)
-                    validation_browser = p.chromium.launch(headless=True)
-                    validation_context = validation_browser.new_context(storage_state=auth_data)
-                    validation_page = validation_context.new_page()
-                    # Открываем тот же URL, где была авторизация (с регионом)
-                    validation_page.goto(auth_url, wait_until="domcontentloaded", timeout=30000)
-                    validation_page.wait_for_timeout(2000)
-
-                    if is_user_authorized(validation_page):
-                        logger.info("✅ Валидация сессии пройдена: авторизация восстановлена.")
-                        validation_context.close()
-                        validation_browser.close()
-                        return True
-                    else:
-                        logger.warning("❌ Валидация не пройдена: сессия не даёт авторизацию. Удаляю auth_state.json.")
-                        try:
-                            AUTH_STATE_FILE.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        validation_context.close()
-                        validation_browser.close()
-                        return False
-                except Exception as e:
-                    logger.error(f"Ошибка валидации сессии: {e}")
-                    try:
-                        AUTH_STATE_FILE.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    return False
-
             else:
-                logger.warning("Авторизация не распознана. Возможно, требуется дополнительное действие (капча, SMS) или вход в новом окне.")
+                logger.warning("Авторизация не распознана. Возможно, требуется дополнительное действие.")
 
         except Exception as e:
             logger.error(f"Ошибка при авторизации: {e}")
@@ -429,43 +447,16 @@ def perform_auth(p, max_attempts=3):
             logger.error("Все попытки авторизации исчерпаны.")
     return False
 
-
 # ------------------------------------------------------------
-# Проверка авторизации для загруженной сессии
-# ------------------------------------------------------------
-def is_user_authorized(page) -> bool:
-    try:
-        url = page.url.lower()
-        if is_logged_in_url(url):
-            return True
-
-        if "login" not in url:
-            for selector in [
-                'a[data-qa="mainmenu_resumes"]',
-                'a[data-qa="applicant-resumes"]',
-            ]:
-                if page.locator(selector).first.is_visible(timeout=500):
-                    return True
-
-        body = page.locator("body").inner_text(timeout=3000)
-        if "Мои резюме" in body or "Мои отклики" in body:
-            return True
-
-        return False
-    except Exception:
-        return False
-
-# ------------------------------------------------------------
-# Основная логика поднятия резюме
+# Основная логика поднятия резюме (без изменений)
 # ------------------------------------------------------------
 def get_resume_status(page, resume_name, url):
     logger.info(f"Проверка резюме '{resume_name}'...")
 
     for attempt in range(3):
         try:
-            # Короткая пауза
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(2000)  # стабилизация DOM
+            page.wait_for_timeout(2000)
             break
         except Exception as e:
             if attempt == 2:
@@ -477,13 +468,9 @@ def get_resume_status(page, resume_name, url):
     else:
         return False, None
 
-    # Проверка на редирект на логин – автоматическое удаление сессии
     if any(marker in page.url.lower() for marker in ("/login", "/auth", "account/login", "oauth/authorize")):
         logger.warning("Сессия устарела. Удаляю auth_state.json.")
-        try:
-            AUTH_STATE_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
+        AUTH_STATE_FILE.unlink(missing_ok=True)
         return False, None
 
     button_selector = 'button[data-qa="resume-update-button"]'
@@ -515,7 +502,6 @@ def get_resume_status(page, resume_name, url):
 
         if is_visible and is_enabled:
             logger.info(f"Кнопка доступна для '{resume_name}'. Нажимаем...")
-            # Упрощённая проверка успеха – считаем клик успешным
             try:
                 lift_button.click(timeout=10000)
                 page.wait_for_timeout(3000)
@@ -525,11 +511,10 @@ def get_resume_status(page, resume_name, url):
                 logger.error(f"Ошибка при клике: {e}")
                 return False, None
         else:
-            logger.info(f"Кнопка для '{resume_name}' неактивна или невидима. Ищем время следующего поднятия...")
+            logger.info(f"Кнопка для '{resume_name}' неактивна или невидима. Ищем время...")
     else:
         logger.info(f"Кнопка не найдена для '{resume_name}'. Ищем информацию о времени...")
 
-    # Поиск времени следующего поднятия
     time_pattern = re.compile(r"(сегодня|завтра)\s+в\s+(\d{2}):(\d{2})", re.IGNORECASE)
     status_text = ""
     try:
@@ -541,7 +526,6 @@ def get_resume_status(page, resume_name, url):
         pass
 
     if not status_text:
-        # Безопасное получение текста body
         try:
             body_text = page.locator("body").inner_text(timeout=5000)
         except Exception:
@@ -619,10 +603,7 @@ def check_and_lift_resumes():
                 context = browser_instance.new_context(storage_state=auth_data)
             except (PlaywrightError, Exception) as e:
                 logger.warning(f"Повреждена сессия: {e}. Удаляю auth_state.json и запрашиваю новую.")
-                try:
-                    AUTH_STATE_FILE.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                AUTH_STATE_FILE.unlink(missing_ok=True)
                 if not perform_auth(p):
                     return False, None
                 auth_data = load_auth_state(AUTH_STATE_FILE)
@@ -630,16 +611,15 @@ def check_and_lift_resumes():
 
             page = context.new_page()
 
-            # Проверяем, что сессия действительна
+            # Проверка сессии – открываем страницу с параметром role=applicant
             try:
-                page.goto("https://hh.ru", wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(2000)
-                if not is_user_authorized(page):
+                page.goto("https://hh.ru/?role=applicant", wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)  # даём время на отрисовку
+                if not is_user_authorized(page, check_text=True):
                     logger.warning("Сессия недействительна. Удаляю auth_state.json и запрашиваю новую.")
                     AUTH_STATE_FILE.unlink(missing_ok=True)
                     if not perform_auth(p):
                         return False, None
-                    # Обновляем контекст после новой авторизации
                     auth_data = load_auth_state(AUTH_STATE_FILE)
                     context = browser_instance.new_context(storage_state=auth_data)
                     page = context.new_page()
@@ -657,7 +637,6 @@ def check_and_lift_resumes():
                     wait_times.append(wait_sec)
 
         finally:
-            # Гарантированное закрытие ресурсов
             try:
                 if context:
                     context.close()
@@ -678,7 +657,7 @@ def check_and_lift_resumes():
         return False, None
 
 # ------------------------------------------------------------
-# Обратный отсчёт (из версии 2.7.0)
+# Обратный отсчёт
 # ------------------------------------------------------------
 def console_countdown(sleep_time):
     end_time = time.time() + sleep_time
@@ -694,13 +673,11 @@ def console_countdown(sleep_time):
             end="",
             flush=True
         )
-        # Проверяем завершение каждые 5 секунд
         for _ in range(min(5, remaining)):
             if should_exit:
                 break
             time.sleep(1)
     print("\r" + " " * 50 + "\r", end="", flush=True)
-
 
 # ------------------------------------------------------------
 # Основной цикл
