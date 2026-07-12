@@ -53,6 +53,7 @@ AUTH_TEXT_SNIPPETS = [
     "Отклики",
     "Ваша активность"
 ]
+
 # ------------------------------------------------------------
 # Базовые пути
 # ------------------------------------------------------------
@@ -117,11 +118,18 @@ def is_logged_in_url(url: str) -> bool:
 # ------------------------------------------------------------
 def load_email_config():
     """Загружает настройки email из config.ini."""
-    logger.info(f"Запуск функции load_email_config")
     config = load_config()
     if not config.has_section("EMAIL"):
+        logger.info("Секция [EMAIL] отсутствует в config.ini. Уведомления отключены.")
         return None
+
     try:
+        # Проверяем, включены ли уведомления (по умолчанию false)
+        enabled = config.getboolean("EMAIL", "email_notify_enabled", fallback=False)
+        if not enabled:
+            logger.info("Email уведомления отключены в config.ini (email_notify_enabled = false).")
+            return None
+
         cfg = {
             "smtp_server": config.get("EMAIL", "smtp_server"),
             "smtp_port": config.getint("EMAIL", "smtp_port"),
@@ -132,7 +140,7 @@ def load_email_config():
         }
         # Проверяем наличие всех обязательных полей
         if not all(cfg.values()):
-            logger.warning("Не все параметры email заполнены в config.ini")
+            logger.warning("Не все параметры email заполнены в config.ini (или есть пустые значения).")
             return None
         return cfg
     except Exception as e:
@@ -141,7 +149,6 @@ def load_email_config():
 
 def read_last_log_lines(n=20):
     """Читает последние n строк из log.txt."""
-    logger.info(f"Запуск функции read_last_log_lines")
     try:
         if not LOG_FILE.exists():
             return "Лог-файл не найден."
@@ -157,7 +164,6 @@ def send_email_notification(subject, body):
     Отправляет email-уведомление, если настроено, не чаще раза в EMAIL_NOTIFY_INTERVAL
     и не более одного раза за запуск программы.
     """
-    logger.info("Запуск функции send_email_notification")
     global _last_email_sent_time, _email_config, _notification_sent_this_run
 
     # Если уведомление уже отправлено в этом запуске — пропускаем
