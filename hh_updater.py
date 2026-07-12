@@ -8,18 +8,29 @@ import logging
 import os
 import re
 import signal
+import smtplib
 import socket
 import sys
 import threading
 import time
 from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.8.17"
+APP_VERSION = "2.8.18"
+
+# ------------------------------------------------------------
+# Константы для email
+# ------------------------------------------------------------
+EMAIL_NOTIFY_INTERVAL = 1800  # минимум 30 минут между уведомлениями
+_last_email_sent_time = 0
+_email_config = None
+_notification_sent_this_run = False
 
 # ------------------------------------------------------------
 # Константы
@@ -100,6 +111,108 @@ def is_logged_in_url(url: str) -> bool:
             or "role=applicant" in url
         )
     )
+
+# ------------------------------------------------------------
+# Функции для работы с email
+# ------------------------------------------------------------
+def load_email_config():
+    """Загружает настройки email из config.ini."""
+    logger.info(f"Запуск функции load_email_config")
+    config = load_config()
+    if not config.has_section("EMAIL"):
+        return None
+    try:
+        cfg = {
+            "smtp_server": config.get("EMAIL", "smtp_server"),
+            "smtp_port": config.getint("EMAIL", "smtp_port"),
+            "smtp_username": config.get("EMAIL", "smtp_username"),
+            "smtp_password": config.get("EMAIL", "smtp_password"),
+            "to_email": config.get("EMAIL", "to_email"),
+            "subject": config.get("EMAIL", "subject", fallback="HH Resume Updater: требуется внимание!"),
+        }
+        # Проверяем наличие всех обязательных полей
+        if not all(cfg.values()):
+            logger.warning("Не все параметры email заполнены в config.ini")
+            return None
+        return cfg
+    except Exception as e:
+        logger.warning(f"Ошибка чтения настроек email: {e}")
+        return None
+
+def read_last_log_lines(n=20):
+    """Читает последние n строк из log.txt."""
+    logger.info(f"Запуск функции read_last_log_lines")
+    try:
+        if not LOG_FILE.exists():
+            return "Лог-файл не найден."
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        return ''.join(lines[-n:])
+    except Exception as e:
+        return f"Ошибка чтения лога: {e}"
+
+
+def send_email_notification(subject, body):
+    """
+    Отправляет email-уведомление, если настроено, не чаще раза в EMAIL_NOTIFY_INTERVAL
+    и не более одного раза за запуск программы.
+    """
+    logger.info("Запуск функции send_email_notification")
+    global _last_email_sent_time, _email_config, _notification_sent_this_run
+
+    # Если уведомление уже отправлено в этом запуске — пропускаем
+    if _notification_sent_this_run:
+        logger.info("Уведомление уже отправлено в текущей сессии, пропускаем.")
+        return
+
+    # Загружаем конфигурацию, если ещё не загружена
+    if _email_config is None:
+        _email_config = load_email_config()
+
+    # Проверка наличия конфигурации
+    if _email_config is None:
+        logger.warning("Email уведомления не настроены (отсутствует секция EMAIL в config.ini). Пропускаем.")
+        return
+
+    # Проверка интервала отправки
+    current_time = time.time()
+    if current_time - _last_email_sent_time < EMAIL_NOTIFY_INTERVAL:
+        remaining = int(EMAIL_NOTIFY_INTERVAL - (current_time - _last_email_sent_time))
+        logger.info(f"Пропускаем отправку email (прошло менее {remaining} сек с момента последнего уведомления).")
+        return
+
+    try:
+        logger.info(
+            f"Попытка отправки email на {_email_config['to_email']} через {_email_config['smtp_server']}:{_email_config['smtp_port']}")
+
+        msg = MIMEMultipart()
+        msg['From'] = _email_config["smtp_username"]
+        msg['To'] = _email_config["to_email"]
+        msg['Subject'] = subject
+
+        full_body = f"{body}\n\nВремя: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nPID: {os.getpid()}\n\n--- Последние строки лога ---\n"
+        full_body += read_last_log_lines(20)
+        msg.attach(MIMEText(full_body, 'plain', 'utf-8'))
+
+        logger.info("Подключаюсь к SMTP-серверу...")
+        server = smtplib.SMTP(_email_config["smtp_server"], _email_config["smtp_port"])
+        server.set_debuglevel(1)
+        server.starttls()
+        logger.info("Вход в SMTP-аккаунт...")
+        server.login(_email_config["smtp_username"], _email_config["smtp_password"])
+        logger.info("Отправка письма...")
+        server.send_message(msg)
+        server.quit()
+
+        _last_email_sent_time = current_time
+        _notification_sent_this_run = True
+        logger.info("✅ Email уведомление успешно отправлено.")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки email: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
 
 # ------------------------------------------------------------
 # Обфускация данных
@@ -445,6 +558,10 @@ def perform_auth(p, max_attempts=3):
             time.sleep(10)
         else:
             logger.error("Все попытки авторизации исчерпаны.")
+            send_email_notification(
+                "HH Resume Updater: ошибка авторизации",
+                "Не удалось авторизоваться после всех попыток. Требуется ручное вмешательство."
+            )
     return False
 
 # ------------------------------------------------------------
@@ -706,6 +823,11 @@ def main():
             status, wait_seconds = check_and_lift_resumes()
         except Exception as e:
             logger.error(f"Необработанное исключение: {e}", exc_info=True)
+            logger.error(f"Необработанное исключение: {e}", exc_info=True)
+            send_email_notification(
+                "HH Resume Updater: критическая ошибка",
+                f"Необработанное исключение: {e}\nПодробности в логе."
+            )
             status = False
             wait_seconds = None
 
