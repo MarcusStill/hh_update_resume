@@ -22,15 +22,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.8.18"
-
-# ------------------------------------------------------------
-# Константы для email
-# ------------------------------------------------------------
-EMAIL_NOTIFY_INTERVAL = 1800  # минимум 30 минут между уведомлениями
-_last_email_sent_time = 0
-_email_config = None
-_notification_sent_this_run = False
+APP_VERSION = "2.8.19"
 
 # ------------------------------------------------------------
 # Константы
@@ -43,16 +35,38 @@ AUTH_SELECTORS = [
 TEXT_LOCATORS = [
     "text=Мои резюме",
     "text=Мои отклики",
+    "text=Resume and profile",
+    "text=Applications",
+    "text=Uplift",
+    "text=Поднять",
 ]
 VISIBLE_TIMEOUT = 500  # таймаут для is_visible (мс)
 AUTH_CHECK_INTERVAL = 20  # интервал проверки текста (секунд)
 _warning_logged = False
 _last_warning_time = 0  # время последнего предупреждения (для ограничения частоты)
 AUTH_TEXT_SNIPPETS = [
+    # Русские варианты
     "Резюме и профиль",
     "Отклики",
-    "Ваша активность"
+    "Ваша активность",
+    "Мои резюме",
+    "Мои отклики",
+    # Английские варианты
+    "Resume and profile",
+    "Applications",
+    "Your activity",
+    "My resumes",
+    "My applications",
+    # Универсальные (признаки авторизованного пользователя)
+    "Uplift your resume",
+    "Uplift",
+    "Поднять",
+    "Поднять резюме",
 ]
+EMAIL_NOTIFY_INTERVAL = 1800  # минимум 30 минут между уведомлениями
+_last_email_sent_time = 0
+_email_config = None
+_notification_sent_this_run = False
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -74,6 +88,7 @@ CONFIG_FILE = BASE_DIR / "config.ini"
 AUTH_STATE_FILE = BASE_DIR / "auth_state.json"
 LOG_FILE = BASE_DIR / "log.txt"
 PID_FILE = BASE_DIR / "hh_autoupdater.pid"
+ERROR_LOGS_DIR = BASE_DIR / "error_logs"
 
 # Настройка логирования с ротацией
 logger = logging.getLogger("hh_updater")
@@ -92,8 +107,7 @@ if not logger.handlers:
 # ------------------------------------------------------------
 def cleanup_old_files(pattern="auth_failed_*.html", keep=5):
     """Оставляет только последние N файлов, остальные удаляет."""
-    # Используем BASE_DIR для поиска
-    search_pattern = str(BASE_DIR / pattern)
+    search_pattern = str(ERROR_LOGS_DIR / pattern)
     files = sorted(glob.glob(search_pattern), key=os.path.getmtime, reverse=True)
     for f in files[keep:]:
         try:
@@ -413,7 +427,14 @@ def is_user_authorized(page, check_text=False) -> bool:
             for text in TEXT_LOCATORS:
                 if page.locator(text).first.is_visible(timeout=VISIBLE_TIMEOUT):
                     return True
-
+        # 4. Проверка наличия кнопки "Поднять" (признак авторизованного пользователя)
+        try:
+            if page.locator('button:has-text("Uplift")').count() > 0:
+                return True
+            if page.locator('button:has-text("Поднять")').count() > 0:
+                return True
+        except:
+            pass
         return False
     except Exception as e:
         current_time = time.time()
@@ -512,18 +533,21 @@ def perform_auth(p, max_attempts=3):
                         pass
                     cookies = context.cookies()
                     logger.info(f"Куки ({len(cookies)}): {[c['name'] for c in cookies[:10]]}" + ("..." if len(cookies) > 10 else ""))
-                    page.screenshot(path="auth_failed.png", full_page=True)
+                    # Сохраняем скриншот в папку error_logs
+                    screenshot_path = ERROR_LOGS_DIR / "auth_failed.png"
+                    page.screenshot(path=str(screenshot_path), full_page=True)
                     logger.info("Сохранён скриншот: auth_failed.png")
                     body_text = page.locator("body").inner_text(timeout=3000)
                     logger.info(f"Текст страницы (первые 500 символов):\n{body_text[:500]}")
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     html_filename = f"auth_failed_{timestamp}.html"
+                    html_path = ERROR_LOGS_DIR / html_filename
                     html_saved = False
                     try:
                         html = page.content()
-                        with open(html_filename, "w", encoding="utf-8") as f:
+                        with open(html_path, "w", encoding="utf-8") as f:
                             f.write(html)
-                        logger.info(f"Сохранён HTML: {html_filename}")
+                        logger.info(f"Сохранён HTML: {html_path}")
                         html_saved = True
                     except Exception as e:
                         logger.warning(f"Не удалось сохранить HTML: {e}")
@@ -820,6 +844,12 @@ def main():
         sys.exit(1)
 
     create_pid_file()
+    # Создаём папку для диагностических файлов
+    try:
+        ERROR_LOGS_DIR.mkdir(exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Не удалось создать папку error_logs: {e}")
+
     logger.info(f"HH Resume Updater {APP_VERSION} запущен. PID={os.getpid()}")
 
     consecutive_errors = 0
