@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 import time
+import types
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -22,7 +23,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.8.20"
+APP_VERSION = "2.8.21"
 
 # ------------------------------------------------------------
 # Константы
@@ -104,7 +105,7 @@ if not logger.handlers:
 # ------------------------------------------------------------
 # Вспомогательные функции
 # ------------------------------------------------------------
-def cleanup_old_files(pattern="auth_failed_*.html", keep=5):
+def cleanup_old_files(pattern: str = "auth_failed_*.html", keep: int = 5) -> None:
     """Оставляет только последние N файлов, остальные удаляет."""
     search_pattern = str(ERROR_LOGS_DIR / pattern)
     files = sorted(glob.glob(search_pattern), key=os.path.getmtime, reverse=True)
@@ -129,7 +130,7 @@ def is_logged_in_url(url: str) -> bool:
 # ------------------------------------------------------------
 # Функции для работы с email
 # ------------------------------------------------------------
-def load_email_config():
+def load_email_config() -> dict | None:
     """Загружает настройки email из config.ini."""
     config = load_config()
     if not config.has_section("EMAIL"):
@@ -160,7 +161,7 @@ def load_email_config():
         logger.warning(f"Ошибка чтения настроек email: {e}")
         return None
 
-def read_last_log_lines(n=20):
+def read_last_log_lines(n: int = 20) -> str:
     """Читает последние n строк из log.txt."""
     try:
         if not LOG_FILE.exists():
@@ -172,9 +173,9 @@ def read_last_log_lines(n=20):
         return f"Ошибка чтения лога: {e}"
 
 
-def send_email_notification(subject, body):
+def send_email_notification(subject: str, body: str) -> None:
     """
-    отправляет email-уведомление, если настроено, не чаще раза в EMAIL_NOTIFY_INTERVAL.
+    Отправляет email-уведомление, если настроено, не чаще раза в EMAIL_NOTIFY_INTERVAL.
     """
     global _last_email_sent_time, _email_config
 
@@ -230,6 +231,7 @@ def send_email_notification(subject, body):
 # Обфускация данных
 # ------------------------------------------------------------
 def _get_obfuscation_key() -> int:
+    """Генерирует ключ для обфускации данных."""
     hostname = socket.gethostname()
     salt = "HH_AUTO_UPDATER_2024"
     combined = (hostname + salt).encode('utf-8')
@@ -237,12 +239,14 @@ def _get_obfuscation_key() -> int:
     return int.from_bytes(hash_bytes, byteorder='big')
 
 def obfuscate_data(data: dict) -> str:
+    """Обфусцирует словарь с данными в строку."""
     key = _get_obfuscation_key() & 0xFF
     json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
     obfuscated = ''.join(chr(ord(c) ^ key) for c in json_str)
     return base64.b64encode(obfuscated.encode('utf-8')).decode('ascii')
 
 def deobfuscate_data(obfuscated_str: str) -> dict:
+    """Деобфусцирует строку обратно в словарь."""
     key = _get_obfuscation_key() & 0xFF
     try:
         decoded = base64.b64decode(obfuscated_str.encode('ascii')).decode('utf-8')
@@ -251,7 +255,7 @@ def deobfuscate_data(obfuscated_str: str) -> dict:
     except Exception as e:
         raise ValueError(f"Не удалось деобфусцировать данные: {e}")
 
-def save_auth_state(context, path: Path) -> bool:
+def save_auth_state(context: "BrowserContext", path: Path) -> bool:
     """Сохраняет сессию с обфускацией и проверяет размер файла (диагностика)."""
     try:
         auth_data = context.storage_state()
@@ -275,6 +279,7 @@ def save_auth_state(context, path: Path) -> bool:
         return False
 
 def load_auth_state(path: Path) -> dict:
+    """Загружает и деобфусцирует сохраненную сессию из файла."""
     try:
         with open(path, 'r', encoding='utf-8') as f:
             obfuscated = f.read().strip()
@@ -288,7 +293,8 @@ def load_auth_state(path: Path) -> dict:
 # ------------------------------------------------------------
 # Вспомогательные функции
 # ------------------------------------------------------------
-def disable_quick_edit():
+def disable_quick_edit() -> None:
+    """Отключает Quick Edit mode в консоли Windows для предотвращения зависаний скрипта."""
     if sys.platform != "win32":
         return
     try:
@@ -302,12 +308,13 @@ def disable_quick_edit():
     except Exception:
         pass
 
-def load_config():
+def load_config() -> configparser.ConfigParser:
+    """Загружает конфигурационный файл."""
     config = configparser.ConfigParser()
     config.read(CONFIG_FILE, encoding="utf-8")
     return config
 
-def ensure_browser_installed():
+def ensure_browser_installed() -> bool:
     """Устанавливает браузер через отдельный поток, если отсутствует."""
     browsers_dir = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
     chromium_dirs = sorted(browsers_dir.glob("chromium-*"))
@@ -341,7 +348,8 @@ def ensure_browser_installed():
     logger.info("Локальный браузер успешно развернут.")
     return True
 
-def is_process_alive(pid):
+def is_process_alive(pid: int) -> bool:
+    """Проверяет, жив ли процесс с указанным PID."""
     if sys.platform == "win32":
         try:
             import ctypes
@@ -363,7 +371,8 @@ def is_process_alive(pid):
         except Exception:
             return False
 
-def create_pid_file():
+def create_pid_file() -> None:
+    """Создает файл с PID текущего процесса."""
     if PID_FILE.exists():
         try:
             with open(PID_FILE, "r", encoding="utf-8") as f:
@@ -379,7 +388,8 @@ def create_pid_file():
     with open(PID_FILE, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
 
-def remove_pid_file():
+def remove_pid_file() -> None:
+    """Удаляет файл с PID."""
     PID_FILE.unlink(missing_ok=True)
 
 atexit.register(remove_pid_file)
@@ -387,7 +397,8 @@ atexit.register(remove_pid_file)
 browser_instance = None
 should_exit = False
 
-def signal_handler(sig, frame):
+def signal_handler(sig: int, frame: "types.FrameType | None") -> None:
+    """Обработчик системных сигналов для корректного завершения программы."""
     global should_exit
     logger.info("Получен сигнал завершения. Останавливаемся...")
     should_exit = True
@@ -397,7 +408,8 @@ def signal_handler(sig, frame):
 # ------------------------------------------------------------
 _warning_logged = False  # флаг для предотвращения спама предупреждений
 
-def is_user_authorized(page, check_text=False) -> bool:
+def is_user_authorized(page: "Page", check_text: bool = False) -> bool:
+    """Проверяет, авторизован ли пользователь на странице."""
     global _last_warning_time
     try:
         url = page.url.lower()
@@ -438,7 +450,8 @@ def is_user_authorized(page, check_text=False) -> bool:
 # ------------------------------------------------------------
 # Авторизация (без валидации через второй браузер)
 # ------------------------------------------------------------
-def perform_auth(p, max_attempts=3):
+def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
+    """Выполняет процесс ручной авторизации пользователя."""
     for attempt in range(1, max_attempts + 1):
         logger.info(f"Попытка авторизации #{attempt} из {max_attempts}")
         browser = None
@@ -589,7 +602,8 @@ def perform_auth(p, max_attempts=3):
 # ------------------------------------------------------------
 # Основная логика поднятия резюме
 # ------------------------------------------------------------
-def get_resume_status(page, resume_name, url):
+def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, int | None]:
+    """Проверяет статус резюме и нажимает кнопку поднятия, если она доступна."""
     logger.info(f"Проверка резюме '{resume_name}'...")
 
     for attempt in range(3):
@@ -711,7 +725,8 @@ def get_resume_status(page, resume_name, url):
 # ------------------------------------------------------------
 # Проверка резюме
 # ------------------------------------------------------------
-def check_and_lift_resumes():
+def check_and_lift_resumes() -> tuple[bool, int | None]:
+    """Основная функция для проверки и поднятия всех резюме из конфигурации."""
     config = load_config()
     if not config.has_section("RESUMES"):
         logger.error("Секция [RESUMES] отсутствует в config.ini")
@@ -798,7 +813,8 @@ def check_and_lift_resumes():
 # ------------------------------------------------------------
 # Обратный отсчёт
 # ------------------------------------------------------------
-def console_countdown(sleep_time):
+def console_countdown(sleep_time: int) -> None:
+    """Выводит обратный отсчет в консоль."""
     end_time = time.time() + sleep_time
     while not should_exit:
         remaining = int(end_time - time.time())
@@ -821,7 +837,8 @@ def console_countdown(sleep_time):
 # ------------------------------------------------------------
 # Основной цикл
 # ------------------------------------------------------------
-def main():
+def main() -> None:
+    """Главная точка входа в программу."""
     disable_quick_edit()
 
     signal.signal(signal.SIGINT, signal_handler)
