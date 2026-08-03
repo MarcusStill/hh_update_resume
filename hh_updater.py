@@ -22,7 +22,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.8.19"
+APP_VERSION = "2.8.20"
 
 # ------------------------------------------------------------
 # Константы
@@ -66,7 +66,6 @@ AUTH_TEXT_SNIPPETS = [
 EMAIL_NOTIFY_INTERVAL = 1800  # минимум 30 минут между уведомлениями
 _last_email_sent_time = 0
 _email_config = None
-_notification_sent_this_run = False
 
 # ------------------------------------------------------------
 # Базовые пути
@@ -175,15 +174,9 @@ def read_last_log_lines(n=20):
 
 def send_email_notification(subject, body):
     """
-    Отправляет email-уведомление, если настроено, не чаще раза в EMAIL_NOTIFY_INTERVAL
-    и не более одного раза за запуск программы.
+    отправляет email-уведомление, если настроено, не чаще раза в EMAIL_NOTIFY_INTERVAL.
     """
-    global _last_email_sent_time, _email_config, _notification_sent_this_run
-
-    # Если уведомление уже отправлено в этом запуске — пропускаем
-    if _notification_sent_this_run:
-        logger.info("Уведомление уже отправлено в текущей сессии, пропускаем.")
-        return
+    global _last_email_sent_time, _email_config
 
     # Загружаем конфигурацию, если ещё не загружена
     if _email_config is None:
@@ -225,7 +218,6 @@ def send_email_notification(subject, body):
         server.quit()
 
         _last_email_sent_time = current_time
-        _notification_sent_this_run = True
         logger.info("✅ Email уведомление успешно отправлено.")
 
     except Exception as e:
@@ -897,6 +889,11 @@ def main():
                 except Exception:
                     sleep_time = 14400
                     logger.warning("Ошибка чтения fallback_interval. Аварийный сон 14400 сек.")
+
+                send_email_notification(
+                    "HH Resume Updater: критический сбой",
+                    f"Произошел критический сбой (3 ошибки подряд). Переход в резервный сон на {sleep_time} сек."
+                )
                 consecutive_errors = 0
 
         console_countdown(sleep_time)
