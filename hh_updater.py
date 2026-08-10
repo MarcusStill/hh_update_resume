@@ -102,9 +102,7 @@ if not logger.handlers:
     console.setFormatter(formatter)
     logger.addHandler(console)
 
-# ------------------------------------------------------------
 # Вспомогательные функции
-# ------------------------------------------------------------
 def cleanup_old_files(pattern: str = "auth_failed_*.html", keep: int = 5) -> None:
     """Оставляет только последние N файлов, остальные удаляет."""
     search_pattern = str(ERROR_LOGS_DIR / pattern)
@@ -127,7 +125,6 @@ def is_logged_in_url(url: str) -> bool:
         )
     )
 
-# ------------------------------------------------------------
 # Функции для работы с email
 # ------------------------------------------------------------
 def load_email_config() -> dict | None:
@@ -141,7 +138,9 @@ def load_email_config() -> dict | None:
         # Проверяем, включены ли уведомления (по умолчанию false)
         enabled = config.getboolean("EMAIL", "email_notify_enabled", fallback=False)
         if not enabled:
-            logger.info("Email уведомления отключены в config.ini (email_notify_enabled = false).")
+            logger.info(
+                "Email уведомления отключены в config.ini (email_notify_enabled = false)."
+            )
             return None
 
         cfg = {
@@ -150,11 +149,15 @@ def load_email_config() -> dict | None:
             "smtp_username": config.get("EMAIL", "smtp_username"),
             "smtp_password": config.get("EMAIL", "smtp_password"),
             "to_email": config.get("EMAIL", "to_email"),
-            "subject": config.get("EMAIL", "subject", fallback="HH Resume Updater: требуется внимание!"),
+            "subject": config.get(
+                "EMAIL", "subject", fallback="HH Resume Updater: требуется внимание!"
+            ),
         }
         # Проверяем наличие всех обязательных полей
         if not all(cfg.values()):
-            logger.warning("Не все параметры email заполнены в config.ini (или есть пустые значения).")
+            logger.warning(
+                "Не все параметры email заполнены в config.ini (или есть пустые значения)."
+            )
             return None
         return cfg
     except Exception as e:
@@ -166,7 +169,7 @@ def read_last_log_lines(n: int = 20) -> str:
     try:
         if not LOG_FILE.exists():
             return "Лог-файл не найден."
-        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
         return ''.join(lines[-n:])
     except Exception as e:
@@ -185,29 +188,47 @@ def send_email_notification(subject: str, body: str) -> None:
 
     # Проверка наличия конфигурации
     if _email_config is None:
-        logger.warning("Email уведомления не настроены (отсутствует секция EMAIL в config.ini). Пропускаем.")
+        logger.warning(
+            "Email уведомления не настроены (отсутствует секция EMAIL в config.ini). Пропускаем."
+        )
         return
 
     # Проверка интервала отправки
     current_time = time.time()
     if current_time - _last_email_sent_time < EMAIL_NOTIFY_INTERVAL:
         remaining = int(EMAIL_NOTIFY_INTERVAL - (current_time - _last_email_sent_time))
-        logger.info(f"Пропускаем отправку email (прошло менее {remaining} сек с момента последнего уведомления).")
+        logger.info(
+            f"Пропускаем отправку email (прошло менее {remaining} сек с момента последнего уведомления)."
+        )
         return
 
     try:
         logger.info(
-            f"Попытка отправки email на {_email_config['to_email']} через {_email_config['smtp_server']}:{_email_config['smtp_port']}")
+            f"Попытка отправки email на {_email_config['to_email']} через {_email_config['smtp_server']}:{_email_config['smtp_port']}"
+        )
 
         msg = MIMEMultipart()
-        msg['From'] = _email_config["smtp_username"]
-        msg['To'] = _email_config["to_email"]
-        msg['Subject'] = subject
+        msg["From"] = _email_config["smtp_username"]
+        msg["To"] = _email_config["to_email"]
+        msg["Subject"] = subject
 
         full_body = f"{body}\n\nВремя: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nPID: {os.getpid()}\n\n--- Последние строки лога ---\n"
         full_body += read_last_log_lines(20)
-        msg.attach(MIMEText(full_body, 'plain', 'utf-8'))
+        msg.attach(MIMEText(full_body, "plain", "utf-8"))
 
+
+        class SmtpLogger:
+            def __init__(self, logger_obj):
+                self.logger = logger_obj
+            def write(self, message):
+                if message.strip():
+                    self.logger.info(message.strip())
+            def flush(self):
+                pass
+                
+        old_stderr = sys.stderr
+        sys.stderr = SmtpLogger(logger)
+        
         logger.info("Подключаюсь к SMTP-серверу...")
         server = smtplib.SMTP(_email_config["smtp_server"], _email_config["smtp_port"])
         server.set_debuglevel(1)
@@ -217,6 +238,9 @@ def send_email_notification(subject: str, body: str) -> None:
         logger.info("Отправка письма...")
         server.send_message(msg)
         server.quit()
+        
+        sys.stderr = old_stderr
+
 
         _last_email_sent_time = current_time
         logger.info("✅ Email уведомление успешно отправлено.")
@@ -224,6 +248,7 @@ def send_email_notification(subject: str, body: str) -> None:
     except Exception as e:
         logger.error(f"❌ Ошибка отправки email: {type(e).__name__}: {e}")
         import traceback
+
         logger.error(traceback.format_exc())
 
 
@@ -260,7 +285,7 @@ def save_auth_state(context: "BrowserContext", path: Path) -> bool:
     try:
         auth_data = context.storage_state()
         obfuscated = obfuscate_data(auth_data)
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(obfuscated)
 
         size = os.path.getsize(path)
@@ -281,7 +306,7 @@ def save_auth_state(context: "BrowserContext", path: Path) -> bool:
 def load_auth_state(path: Path) -> dict:
     """Загружает и деобфусцирует сохраненную сессию из файла."""
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, "r", encoding="utf-8") as f:
             obfuscated = f.read().strip()
         if not obfuscated:
             raise ValueError("Файл сессии пуст")
@@ -290,9 +315,7 @@ def load_auth_state(path: Path) -> dict:
         logger.warning(f"Ошибка загрузки сессии: {e}")
         raise
 
-# ------------------------------------------------------------
 # Вспомогательные функции
-# ------------------------------------------------------------
 def disable_quick_edit() -> None:
     """Отключает Quick Edit mode в консоли Windows для предотвращения зависаний скрипта."""
     if sys.platform != "win32":
@@ -331,6 +354,7 @@ def ensure_browser_installed() -> bool:
 
     def install():
         from playwright.__main__ import main as playwright_main
+
         old_argv = sys.argv.copy()
         try:
             sys.argv = ["playwright", "install", "chromium"]
@@ -353,6 +377,7 @@ def is_process_alive(pid: int) -> bool:
     if sys.platform == "win32":
         try:
             import ctypes
+
             kernel32 = ctypes.windll.kernel32
             handle = kernel32.OpenProcess(0x1000, False, pid)
             if handle:
@@ -403,9 +428,7 @@ def signal_handler(sig: int, frame: "types.FrameType | None") -> None:
     logger.info("Получен сигнал завершения. Останавливаемся...")
     should_exit = True
 
-# ------------------------------------------------------------
 # Проверка авторизации
-# ------------------------------------------------------------
 _warning_logged = False  # флаг для предотвращения спама предупреждений
 
 def is_user_authorized(page: "Page", check_text: bool = False) -> bool:
@@ -447,7 +470,6 @@ def is_user_authorized(page: "Page", check_text: bool = False) -> bool:
             _last_warning_time = current_time
         return False
 
-# ------------------------------------------------------------
 # Авторизация (без валидации через второй браузер)
 # ------------------------------------------------------------
 def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
@@ -463,9 +485,7 @@ def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
 
             try:
                 page.goto(
-                    "https://hh.ru",
-                    wait_until="domcontentloaded",
-                    timeout=45000
+                    "https://hh.ru", wait_until="domcontentloaded", timeout=45000
                 )
                 logger.info(f"Главная страница загружена: {page.url}")
             except Exception as e:
@@ -508,7 +528,9 @@ def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
 
                 # Проверка авторизации (без текста каждую секунду)
                 if is_user_authorized(page, check_text=False):
-                    logger.info(f"Обнаружена авторизация по URL/селекторам: {current_url}")
+                    logger.info(
+                        f"Обнаружена авторизация по URL/селекторам: {current_url}"
+                    )
                     auth_success = True
                     break
 
@@ -524,7 +546,9 @@ def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
 
             # Диагностика при неудаче (без изменений)
             if not auth_success:
-                logger.warning("Не удалось подтвердить авторизацию. Собираю детальную диагностику...")
+                logger.warning(
+                    "Не удалось подтвердить авторизацию. Собираю детальную диагностику..."
+                )
                 try:
                     logger.info(f"Финальный URL: {page.url}")
                     try:
@@ -537,7 +561,10 @@ def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
                     except Exception:
                         pass
                     cookies = context.cookies()
-                    logger.info(f"Куки ({len(cookies)}): {[c['name'] for c in cookies[:10]]}" + ("..." if len(cookies) > 10 else ""))
+                    logger.info(
+                        f"Куки ({len(cookies)}): {[c['name'] for c in cookies[:10]]}"
+                        + ("..." if len(cookies) > 10 else "")
+                    )
                     # Сохраняем скриншот в папку error_logs
                     screenshot_path = ERROR_LOGS_DIR / "auth_failed.png"
                     page.screenshot(path=str(screenshot_path), full_page=True)
@@ -569,10 +596,12 @@ def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
                     logger.info("✅ Сессия успешно сохранена и проверена.")
                     return True
                 else:
-                    logger.error("❌ Не удалось сохранить сессию (проверка размера не пройдена).")
+                    logger.error(
+                        "❌ Не удалось сохранить сессию (проверка размера не пройдена)."
+                    )
                     return False
             else:
-                logger.warning("Авторизация не распознана. Возможно, требуется дополнительное действие.")
+                logger.warning("Авторизация не удалась.")
 
         except Exception as e:
             logger.error(f"Ошибка при авторизации: {e}")
@@ -599,7 +628,6 @@ def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
             )
     return False
 
-# ------------------------------------------------------------
 # Основная логика поднятия резюме
 # ------------------------------------------------------------
 def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, int | None]:
@@ -621,7 +649,10 @@ def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, i
     else:
         return False, None
 
-    if any(marker in page.url.lower() for marker in ("/login", "/auth", "account/login", "oauth/authorize")):
+    if any(
+        marker in page.url.lower()
+        for marker in ("/login", "/auth", "account/login", "oauth/authorize")
+    ):
         logger.warning("Сессия устарела. Удаляю auth_state.json.")
         AUTH_STATE_FILE.unlink(missing_ok=True)
         return False, None
@@ -629,7 +660,7 @@ def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, i
     button_selector = 'button[data-qa="resume-update-button"]'
     fallback_selectors = [
         'button:has-text("Поднять в поиске")',
-        'button:has-text("Поднять")'
+        'button:has-text("Поднять")',
     ]
 
     lift_button = None
@@ -664,15 +695,20 @@ def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, i
                 logger.error(f"Ошибка при клике: {e}")
                 return False, None
         else:
-            logger.info(f"Кнопка для '{resume_name}' неактивна или невидима. Ищем время...")
+            logger.info(
+                f"Кнопка для '{resume_name}' неактивна или невидима. Ищем время..."
+            )
     else:
-        logger.info(f"Кнопка не найдена для '{resume_name}'. Ищем информацию о времени...")
+        logger.info(
+            f"Кнопка не найдена для '{resume_name}'. Ищем информацию о времени..."
+        )
 
     time_pattern = re.compile(r"(сегодня|завтра)\s+в\s+(\d{2}):(\d{2})", re.IGNORECASE)
     status_text = ""
     try:
         possible_divs = page.locator(
-            "div:has-text('Можно сегодня в'), div:has-text('Можно завтра в'), div:has-text('Поднятие резюме')")
+            "div:has-text('Можно сегодня в'), div:has-text('Можно завтра в'), div:has-text('Поднятие резюме')"
+        )
         if possible_divs.count():
             status_text = possible_divs.last.inner_text()
     except Exception:
@@ -690,16 +726,17 @@ def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, i
             minute = int(match.group(3))
             now = datetime.now()
             target_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if day_word == "завтра":
-                target_time += timedelta(days=1)
-            elif day_word == "сегодня" and target_time < now:
+            if day_word == "завтра" or day_word == "сегодня" and target_time < now:
                 target_time += timedelta(days=1)
             diff_seconds = max(0, int((target_time - now).total_seconds()))
             logger.info(
-                f"Найдено время следующего поднятия: {target_time.strftime('%Y-%m-%d %H:%M')} (через {diff_seconds // 60} мин)")
+                f"Найдено время следующего поднятия: {target_time.strftime('%Y-%m-%d %H:%M')} (через {diff_seconds // 60} мин)"
+            )
             return False, diff_seconds
         else:
-            logger.warning(f"Не удалось найти информацию о времени поднятия для '{resume_name}'.")
+            logger.warning(
+                f"Не удалось найти информацию о времени поднятия для '{resume_name}'."
+            )
             return False, None
     else:
         clean_text = re.sub(r"\s+", " ", status_text).strip()
@@ -710,19 +747,17 @@ def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, i
             minute = int(match.group(3))
             now = datetime.now()
             target_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if day_word == "завтра":
-                target_time += timedelta(days=1)
-            elif day_word == "сегодня" and target_time < now:
+            if day_word == "завтра" or day_word == "сегодня" and target_time < now:
                 target_time += timedelta(days=1)
             diff_seconds = max(0, int((target_time - now).total_seconds()))
             logger.info(
-                f"Для '{resume_name}' следующее поднятие: {target_time.strftime('%Y-%m-%d %H:%M')} (через {diff_seconds // 60} мин)")
+                f"Для '{resume_name}' следующее поднятие: {target_time.strftime('%Y-%m-%d %H:%M')} (через {diff_seconds // 60} мин)"
+            )
             return False, diff_seconds
         else:
             logger.warning(f"Формат времени не распознан: {clean_text}")
             return False, None
 
-# ------------------------------------------------------------
 # Проверка резюме
 # ------------------------------------------------------------
 def check_and_lift_resumes() -> tuple[bool, int | None]:
@@ -756,7 +791,9 @@ def check_and_lift_resumes() -> tuple[bool, int | None]:
                 auth_data = load_auth_state(AUTH_STATE_FILE)
                 context = browser_instance.new_context(storage_state=auth_data)
             except (PlaywrightError, Exception) as e:
-                logger.warning(f"Повреждена сессия: {e}. Удаляю auth_state.json и запрашиваю новую.")
+                logger.warning(
+                    f"Повреждена сессия: {e}. Удаляю auth_state.json и запрашиваю новую."
+                )
                 AUTH_STATE_FILE.unlink(missing_ok=True)
                 if not perform_auth(p):
                     return False, None
@@ -767,10 +804,16 @@ def check_and_lift_resumes() -> tuple[bool, int | None]:
 
             # Проверка сессии – открываем страницу с параметром role=applicant
             try:
-                page.goto("https://hh.ru/?role=applicant", wait_until="domcontentloaded", timeout=30000)
+                page.goto(
+                    "https://hh.ru/?role=applicant",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
                 page.wait_for_timeout(3000)  # даём время на отрисовку
                 if not is_user_authorized(page, check_text=True):
-                    logger.warning("Сессия недействительна. Удаляю auth_state.json и запрашиваю новую.")
+                    logger.warning(
+                        "Сессия недействительна. Удаляю auth_state.json и запрашиваю новую."
+                    )
                     AUTH_STATE_FILE.unlink(missing_ok=True)
                     if not perform_auth(p):
                         return False, None
@@ -810,9 +853,7 @@ def check_and_lift_resumes() -> tuple[bool, int | None]:
     else:
         return False, None
 
-# ------------------------------------------------------------
 # Обратный отсчёт
-# ------------------------------------------------------------
 def console_countdown(sleep_time: int) -> None:
     """Выводит обратный отсчет в консоль."""
     end_time = time.time() + sleep_time
@@ -823,10 +864,9 @@ def console_countdown(sleep_time: int) -> None:
         hours, rem = divmod(remaining, 3600)
         minutes, _ = divmod(rem, 60)
         print(
-            f"\r⏳ До следующей проверки: "
-            f"{hours:02d}ч {minutes:02d}мин  ",
+            f"\r⏳ До следующей проверки: " f"{hours:02d}ч {minutes:02d}мин  ",
             end="",
-            flush=True
+            flush=True,
         )
         for _ in range(min(5, remaining)):
             if should_exit:
@@ -834,9 +874,7 @@ def console_countdown(sleep_time: int) -> None:
             time.sleep(1)
     print("\r" + " " * 50 + "\r", end="", flush=True)
 
-# ------------------------------------------------------------
 # Основной цикл
-# ------------------------------------------------------------
 def main() -> None:
     """Главная точка входа в программу."""
     disable_quick_edit()
@@ -871,7 +909,7 @@ def main() -> None:
             logger.error(f"Необработанное исключение: {e}", exc_info=True)
             send_email_notification(
                 "HH Resume Updater: критическая ошибка",
-                f"Необработанное исключение: {e}\nПодробности в логе."
+                f"Необработанное исключение: {e}\nПодробности в логе.",
             )
             status = False
             wait_seconds = None
@@ -883,7 +921,9 @@ def main() -> None:
             consecutive_errors = 0
             try:
                 config = load_config()
-                sleep_time = int(config["SETTINGS"].get("check_interval_seconds", "14500"))
+                sleep_time = int(
+                    config["SETTINGS"].get("check_interval_seconds", "14500")
+                )
                 logger.info(f"Резюме обновлены. Плановый сон: {sleep_time} сек.")
             except Exception:
                 sleep_time = 14400
@@ -892,25 +932,41 @@ def main() -> None:
             consecutive_errors = 0
             sleep_time = wait_seconds + 300
             logger.info(
-                f"Рассчитано время до следующего поднятия: {wait_seconds} сек. Сон с запасом: {sleep_time} сек.")
+                f"Рассчитано время до следующего поднятия: {wait_seconds} сек. Сон с запасом: {sleep_time} сек."
+            )
         else:
             consecutive_errors += 1
             if consecutive_errors < 3:
                 sleep_time = 300
-                logger.warning(f"Сбой #{consecutive_errors}. Быстрая перепроверка через 5 мин.")
+                logger.warning(
+                    f"Сбой #{consecutive_errors}. Быстрая перепроверка через 5 мин."
+                )
             else:
                 try:
                     config = load_config()
-                    sleep_time = int(config["SETTINGS"].get("fallback_interval_seconds", "14500"))
-                    logger.warning(f"Критический сбой (3 раза). Резервный сон: {sleep_time} сек.")
+                    sleep_time = int(
+                        config["SETTINGS"].get("fallback_interval_seconds", "14500")
+                    )
+                    logger.warning(
+                        f"Критический сбой (3 раза). Резервный сон: {sleep_time} сек."
+                    )
                 except Exception:
                     sleep_time = 14400
-                    logger.warning("Ошибка чтения fallback_interval. Аварийный сон 14400 сек.")
+                    logger.warning(
+                        "Ошибка чтения fallback_interval. Аварийный сон 14400 сек."
+                    )
 
                 send_email_notification(
                     "HH Resume Updater: критический сбой",
-                    f"Произошел критический сбой (3 ошибки подряд). Переход в резервный сон на {sleep_time} сек."
+                    f"Произошел критический сбой (3 ошибки подряд). Переход в резервный сон на {sleep_time} сек.\n"
+                    f"Удаляю auth_state.json для принудительной переавторизации в следующий раз.",
                 )
+                if AUTH_STATE_FILE.exists():
+                    try:
+                        AUTH_STATE_FILE.unlink()
+                        logger.info("Файл auth_state.json удален из-за частых ошибок.")
+                    except Exception as e:
+                        logger.error(f"Не удалось удалить auth_state.json: {e}")
                 consecutive_errors = 0
 
         console_countdown(sleep_time)
