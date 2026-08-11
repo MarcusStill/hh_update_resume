@@ -23,7 +23,7 @@ from pathlib import Path
 # ------------------------------------------------------------
 # Версия приложения
 # ------------------------------------------------------------
-APP_VERSION = "2.8.21"
+APP_VERSION = "2.9.0"
 
 # ------------------------------------------------------------
 # Константы
@@ -225,10 +225,10 @@ def send_email_notification(subject: str, body: str) -> None:
                     self.logger.info(message.strip())
             def flush(self):
                 pass
-                
+
         old_stderr = sys.stderr
         sys.stderr = SmtpLogger(logger)
-        
+
         logger.info("Подключаюсь к SMTP-серверу...")
         server = smtplib.SMTP(_email_config["smtp_server"], _email_config["smtp_port"])
         server.set_debuglevel(1)
@@ -238,9 +238,8 @@ def send_email_notification(subject: str, body: str) -> None:
         logger.info("Отправка письма...")
         server.send_message(msg)
         server.quit()
-        
-        sys.stderr = old_stderr
 
+        sys.stderr = old_stderr
 
         _last_email_sent_time = current_time
         logger.info("✅ Email уведомление успешно отправлено.")
@@ -959,14 +958,19 @@ def main() -> None:
                 send_email_notification(
                     "HH Resume Updater: критический сбой",
                     f"Произошел критический сбой (3 ошибки подряд). Переход в резервный сон на {sleep_time} сек.\n"
-                    f"Удаляю auth_state.json для принудительной переавторизации в следующий раз.",
+                    f"Удаляю auth_state.json для принудительной переавторизации в следующий раз."
                 )
+
                 if AUTH_STATE_FILE.exists():
                     try:
                         AUTH_STATE_FILE.unlink()
                         logger.info("Файл auth_state.json удален из-за частых ошибок.")
+                        # Устанавливаем короткий таймаут перед повторным запуском
+                        sleep_time = 5
+                        logger.info(f"Таймаут сброшен до {sleep_time} сек для немедленного обновления сессии.")
                     except Exception as e:
                         logger.error(f"Не удалось удалить auth_state.json: {e}")
+
                 consecutive_errors = 0
 
         console_countdown(sleep_time)
