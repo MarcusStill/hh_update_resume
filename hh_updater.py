@@ -21,7 +21,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # Версия приложения
-APP_VERSION = "2.9.0"
+APP_VERSION = "2.9.1"
 
 # Константы
 MIN_AUTH_STATE_SIZE = 500  # минимальный размер auth_state.json (байт)
