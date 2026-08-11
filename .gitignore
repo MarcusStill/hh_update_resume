@@ -1,0 +1,10 @@
+dist/
+build/
+release/
+*.exe
+pw-browsers/
+auth_state.json
+log.txt
+*.pyc
+__pycache__/
+*.spec
