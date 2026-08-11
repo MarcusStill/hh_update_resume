@@ -20,14 +20,10 @@ from email.mime.text import MIMEText
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-# ------------------------------------------------------------
 # Версия приложения
-# ------------------------------------------------------------
 APP_VERSION = "2.9.0"
 
-# ------------------------------------------------------------
 # Константы
-# ------------------------------------------------------------
 MIN_AUTH_STATE_SIZE = 500  # минимальный размер auth_state.json (байт)
 AUTH_SELECTORS = [
     'a[data-qa="mainmenu_resumes"]',
@@ -68,9 +64,7 @@ EMAIL_NOTIFY_INTERVAL = 1800  # минимум 30 минут между увед
 _last_email_sent_time = 0
 _email_config = None
 
-# ------------------------------------------------------------
 # Базовые пути
-# ------------------------------------------------------------
 
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys.executable).parent
@@ -81,9 +75,7 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(BASE_DIR / "pw-browsers")
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
-# ------------------------------------------------------------
 # Конфигурация
-# ------------------------------------------------------------
 CONFIG_FILE = BASE_DIR / "config.ini"
 AUTH_STATE_FILE = BASE_DIR / "auth_state.json"
 LOG_FILE = BASE_DIR / "log.txt"
@@ -126,7 +118,6 @@ def is_logged_in_url(url: str) -> bool:
     )
 
 # Функции для работы с email
-# ------------------------------------------------------------
 def load_email_config() -> dict | None:
     """Загружает настройки email из config.ini."""
     config = load_config()
@@ -215,6 +206,7 @@ def send_email_notification(subject: str, body: str) -> None:
         full_body = f"{body}\n\nВремя: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nPID: {os.getpid()}\n\n--- Последние строки лога ---\n"
         full_body += read_last_log_lines(20)
         msg.attach(MIMEText(full_body, "plain", "utf-8"))
+        msg.attach(MIMEText(full_body, "plain", "utf-8"))
 
 
         class SmtpLogger:
@@ -251,9 +243,7 @@ def send_email_notification(subject: str, body: str) -> None:
         logger.error(traceback.format_exc())
 
 
-# ------------------------------------------------------------
 # Обфускация данных
-# ------------------------------------------------------------
 def _get_obfuscation_key() -> int:
     """Генерирует ключ для обфускации данных."""
     hostname = socket.gethostname()
@@ -470,7 +460,6 @@ def is_user_authorized(page: "Page", check_text: bool = False) -> bool:
         return False
 
 # Авторизация (без валидации через второй браузер)
-# ------------------------------------------------------------
 def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
     """Выполняет процесс ручной авторизации пользователя."""
     for attempt in range(1, max_attempts + 1):
@@ -628,7 +617,6 @@ def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
     return False
 
 # Основная логика поднятия резюме
-# ------------------------------------------------------------
 def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, int | None]:
     """Проверяет статус резюме и нажимает кнопку поднятия, если она доступна."""
     logger.info(f"Проверка резюме '{resume_name}'...")
@@ -758,7 +746,6 @@ def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, i
             return False, None
 
 # Проверка резюме
-# ------------------------------------------------------------
 def check_and_lift_resumes() -> tuple[bool, int | None]:
     """Основная функция для проверки и поднятия всех резюме из конфигурации."""
     config = load_config()
