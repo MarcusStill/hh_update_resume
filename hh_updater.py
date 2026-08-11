@@ -328,18 +328,20 @@ def load_config() -> configparser.ConfigParser:
 
 def ensure_browser_installed() -> bool:
     """Устанавливает браузер через отдельный поток, если отсутствует."""
-    browsers_dir = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
-    chromium_dirs = sorted(browsers_dir.glob("chromium-*"))
-    if chromium_dirs:
-        chromium_dir = chromium_dirs[-1]
-        if sys.platform == "win32":
-            chrome_exe = chromium_dir / "chrome-win" / "chrome.exe"
-        else:
-            chrome_exe = chromium_dir / "chrome-linux" / "chrome"
-        if chrome_exe.exists():
-            return False
-
     logger.info("Проверка наличия браузера.")
+    
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            # executable_path() вернет путь или выбросит ошибку
+            browser_path = p.chromium.executable_path
+            if os.path.exists(browser_path):
+                logger.info("Локальный браузер найден.")
+                return False
+    except Exception:
+        pass
+        
+    logger.info("Браузер не найден. Начинаю скачивание Chromium...")
 
     def install():
         from playwright.__main__ import main as playwright_main
@@ -356,8 +358,15 @@ def ensure_browser_installed() -> bool:
     thread = threading.Thread(target=install)
     thread.start()
     thread.join()
-    if not list(browsers_dir.glob("chromium-*")):
+    
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            if not os.path.exists(p.chromium.executable_path):
+                raise RuntimeError("Браузер не найден после установки.")
+    except Exception:
         raise RuntimeError("Не удалось установить браузер.")
+        
     logger.info("Локальный браузер успешно развернут.")
     return True
 
