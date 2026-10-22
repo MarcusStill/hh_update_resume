@@ -21,7 +21,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # Версия приложения
-APP_VERSION = "2.9.1"
+APP_VERSION = "2.9.2"
 
 # Константы
 MIN_AUTH_STATE_SIZE = 500  # минимальный размер auth_state.json (байт)
@@ -86,13 +86,14 @@ ERROR_LOGS_DIR = BASE_DIR / "error_logs"
 logger = logging.getLogger("hh_updater")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
-    handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(formatter)
     logger.addHandler(console)
+
 
 # Вспомогательные функции
 def cleanup_old_files(pattern: str = "auth_failed_*.html", keep: int = 5) -> None:
@@ -106,16 +107,18 @@ def cleanup_old_files(pattern: str = "auth_failed_*.html", keep: int = 5) -> Non
         except Exception as e:
             logger.warning(f"Не удалось удалить {f}: {e}")
 
+
 def is_logged_in_url(url: str) -> bool:
     """Проверяет, указывает ли URL на личный кабинет соискателя."""
     url = url.lower()
     return (
-        "login" not in url
-        and (
-            "/applicant" in url
-            or "role=applicant" in url
-        )
+            "login" not in url
+            and (
+                    "/applicant" in url
+                    or "role=applicant" in url
+            )
     )
+
 
 # Функции для работы с email
 def load_email_config() -> dict | None:
@@ -154,6 +157,7 @@ def load_email_config() -> dict | None:
     except Exception as e:
         logger.warning(f"Ошибка чтения настроек email: {e}")
         return None
+
 
 def read_last_log_lines(n: int = 20) -> str:
     """Читает последние n строк из log.txt."""
@@ -208,13 +212,14 @@ def send_email_notification(subject: str, body: str) -> None:
         msg.attach(MIMEText(full_body, "plain", "utf-8"))
         msg.attach(MIMEText(full_body, "plain", "utf-8"))
 
-
         class SmtpLogger:
             def __init__(self, logger_obj):
                 self.logger = logger_obj
+
             def write(self, message):
                 if message.strip():
                     self.logger.info(message.strip())
+
             def flush(self):
                 pass
 
@@ -244,41 +249,56 @@ def send_email_notification(subject: str, body: str) -> None:
 
 
 # Обфускация данных
-def _get_obfuscation_key() -> int:
+def _get_encryption_key() -> str:
     """Генерирует ключ для обфускации данных."""
-    hostname = socket.gethostname()
-    salt = "HH_AUTO_UPDATER_2024"
-    combined = (hostname + salt).encode('utf-8')
-    hash_bytes = hashlib.sha256(combined).digest()[:4]
-    return int.from_bytes(hash_bytes, byteorder='big')
+    config = load_config()
+    try:
+        resume_main = config.get("RESUMES", "resume_main")
+        if resume_main and len(resume_main) >= 6:
+            return resume_main[-6:]
+    except Exception:
+        pass
+    return "123456"  # Fallback key
+
 
 def obfuscate_data(data: dict) -> str:
     """Обфусцирует словарь с данными в строку."""
-    key = _get_obfuscation_key() & 0xFF
+    key_str = _get_encryption_key()
+    key_len = len(key_str)
     json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-    obfuscated = ''.join(chr(ord(c) ^ key) for c in json_str)
+    obfuscated = ''.join(chr(ord(c) ^ ord(key_str[i % key_len])) for i, c in enumerate(json_str))
     return base64.b64encode(obfuscated.encode('utf-8')).decode('ascii')
+
 
 def deobfuscate_data(obfuscated_str: str) -> dict:
     """Деобфусцирует строку обратно в словарь."""
-    key = _get_obfuscation_key() & 0xFF
+    key_str = _get_encryption_key()
+    key_len = len(key_str)
     try:
         decoded = base64.b64decode(obfuscated_str.encode('ascii')).decode('utf-8')
-        json_str = ''.join(chr(ord(c) ^ key) for c in decoded)
+        json_str = ''.join(chr(ord(c) ^ ord(key_str[i % key_len])) for i, c in enumerate(decoded))
         return json.loads(json_str)
     except Exception as e:
         raise ValueError(f"Не удалось деобфусцировать данные: {e}")
+
 
 def save_auth_state(context: "BrowserContext", path: Path) -> bool:
     """Сохраняет сессию с обфускацией и проверяет размер файла (диагностика)."""
     try:
         auth_data = context.storage_state()
-        obfuscated = obfuscate_data(auth_data)
+        config = load_config()
+        encrypt_status = config.getboolean("ENCRYPT", "status", fallback=False)
+
+        if encrypt_status:
+            content_to_save = obfuscate_data(auth_data)
+        else:
+            content_to_save = json.dumps(auth_data, ensure_ascii=False, indent=2)
+
         with open(path, "w", encoding="utf-8") as f:
-            f.write(obfuscated)
+            f.write(content_to_save)
 
         size = os.path.getsize(path)
-        logger.info(f"Сессия сохранена в {path} (размер: {size} байт)")
+        logger.info(f"Сессия сохранена в {path} (размер: {size} байт, шифрование: {encrypt_status})")
 
         # Только предупреждение, не ошибка — размер может меняться в зависимости от версии Playwright
         if size < MIN_AUTH_STATE_SIZE:
@@ -292,19 +312,26 @@ def save_auth_state(context: "BrowserContext", path: Path) -> bool:
         logger.error(f"Ошибка сохранения сессии: {e}")
         return False
 
+
 def load_auth_state(path: Path) -> dict:
     """Загружает и деобфусцирует сохраненную сессию из файла."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            obfuscated = f.read().strip()
-        if not obfuscated:
+            content = f.read().strip()
+        if not content:
             raise ValueError("Файл сессии пуст")
-        return deobfuscate_data(obfuscated)
+
+        try:
+            # First try parsing as plain JSON
+            return json.loads(content)
+        except json.JSONDecodeError:
+            # If it fails, assume it's obfuscated
+            return deobfuscate_data(content)
     except Exception as e:
         logger.warning(f"Ошибка загрузки сессии: {e}")
         raise
 
-# Вспомогательные функции
+
 def disable_quick_edit() -> None:
     """Отключает Quick Edit mode в консоли Windows для предотвращения зависаний скрипта."""
     if sys.platform != "win32":
@@ -320,16 +347,18 @@ def disable_quick_edit() -> None:
     except Exception:
         pass
 
+
 def load_config() -> configparser.ConfigParser:
     """Загружает конфигурационный файл."""
     config = configparser.ConfigParser()
     config.read(CONFIG_FILE, encoding="utf-8")
     return config
 
+
 def ensure_browser_installed() -> bool:
     """Устанавливает браузер через отдельный поток, если отсутствует."""
     logger.info("Проверка наличия браузера.")
-    
+
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -340,7 +369,7 @@ def ensure_browser_installed() -> bool:
                 return False
     except Exception:
         pass
-        
+
     logger.info("Браузер не найден. Начинаю скачивание Chromium...")
 
     def install():
@@ -358,7 +387,7 @@ def ensure_browser_installed() -> bool:
     thread = threading.Thread(target=install)
     thread.start()
     thread.join()
-    
+
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
@@ -366,9 +395,10 @@ def ensure_browser_installed() -> bool:
                 raise RuntimeError("Браузер не найден после установки.")
     except Exception:
         raise RuntimeError("Не удалось установить браузер.")
-        
+
     logger.info("Локальный браузер успешно развернут.")
     return True
+
 
 def is_process_alive(pid: int) -> bool:
     """Проверяет, жив ли процесс с указанным PID."""
@@ -394,6 +424,7 @@ def is_process_alive(pid: int) -> bool:
         except Exception:
             return False
 
+
 def create_pid_file() -> None:
     """Создает файл с PID текущего процесса."""
     if PID_FILE.exists():
@@ -411,14 +442,17 @@ def create_pid_file() -> None:
     with open(PID_FILE, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
 
+
 def remove_pid_file() -> None:
     """Удаляет файл с PID."""
     PID_FILE.unlink(missing_ok=True)
+
 
 atexit.register(remove_pid_file)
 
 browser_instance = None
 should_exit = False
+
 
 def signal_handler(sig: int, frame: "types.FrameType | None") -> None:
     """Обработчик системных сигналов для корректного завершения программы."""
@@ -426,8 +460,10 @@ def signal_handler(sig: int, frame: "types.FrameType | None") -> None:
     logger.info("Получен сигнал завершения. Останавливаемся...")
     should_exit = True
 
+
 # Проверка авторизации
 _warning_logged = False  # флаг для предотвращения спама предупреждений
+
 
 def is_user_authorized(page: "Page", check_text: bool = False) -> bool:
     """Проверяет, авторизован ли пользователь на странице."""
@@ -467,6 +503,7 @@ def is_user_authorized(page: "Page", check_text: bool = False) -> bool:
             logger.warning(f"Неожиданная ошибка в is_user_authorized: {e}")
             _last_warning_time = current_time
         return False
+
 
 # Авторизация (без валидации через второй браузер)
 def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
@@ -625,6 +662,7 @@ def perform_auth(p: "Playwright", max_attempts: int = 3) -> bool:
             )
     return False
 
+
 # Основная логика поднятия резюме
 def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, int | None]:
     """Проверяет статус резюме и нажимает кнопку поднятия, если она доступна."""
@@ -646,8 +684,8 @@ def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, i
         return False, None
 
     if any(
-        marker in page.url.lower()
-        for marker in ("/login", "/auth", "account/login", "oauth/authorize")
+            marker in page.url.lower()
+            for marker in ("/login", "/auth", "account/login", "oauth/authorize")
     ):
         logger.warning("Сессия устарела. Удаляю auth_state.json.")
         AUTH_STATE_FILE.unlink(missing_ok=True)
@@ -754,6 +792,7 @@ def get_resume_status(page: "Page", resume_name: str, url: str) -> tuple[bool, i
             logger.warning(f"Формат времени не распознан: {clean_text}")
             return False, None
 
+
 # Проверка резюме
 def check_and_lift_resumes() -> tuple[bool, int | None]:
     """Основная функция для проверки и поднятия всех резюме из конфигурации."""
@@ -848,6 +887,7 @@ def check_and_lift_resumes() -> tuple[bool, int | None]:
     else:
         return False, None
 
+
 # Обратный отсчёт
 def console_countdown(sleep_time: int) -> None:
     """Выводит обратный отсчет в консоль."""
@@ -868,6 +908,7 @@ def console_countdown(sleep_time: int) -> None:
                 break
             time.sleep(1)
     print("\r" + " " * 50 + "\r", end="", flush=True)
+
 
 # Основной цикл
 def main() -> None:
