@@ -244,27 +244,32 @@ def send_email_notification(subject: str, body: str) -> None:
 
 
 # Обфускация данных
-def _get_obfuscation_key() -> int:
+def _get_encryption_key() -> str:
     """Генерирует ключ для обфускации данных."""
-    hostname = socket.gethostname()
-    salt = "HH_AUTO_UPDATER_2024"
-    combined = (hostname + salt).encode('utf-8')
-    hash_bytes = hashlib.sha256(combined).digest()[:4]
-    return int.from_bytes(hash_bytes, byteorder='big')
+    config = load_config()
+    try:
+        resume_main = config.get("RESUMES", "resume_main")
+        if resume_main and len(resume_main) >= 6:
+            return resume_main[-6:]
+    except Exception:
+        pass
+    return "123456" # Fallback key
 
 def obfuscate_data(data: dict) -> str:
     """Обфусцирует словарь с данными в строку."""
-    key = _get_obfuscation_key() & 0xFF
+    key_str = _get_encryption_key()
+    key_len = len(key_str)
     json_str = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-    obfuscated = ''.join(chr(ord(c) ^ key) for c in json_str)
+    obfuscated = ''.join(chr(ord(c) ^ ord(key_str[i % key_len])) for i, c in enumerate(json_str))
     return base64.b64encode(obfuscated.encode('utf-8')).decode('ascii')
 
 def deobfuscate_data(obfuscated_str: str) -> dict:
     """Деобфусцирует строку обратно в словарь."""
-    key = _get_obfuscation_key() & 0xFF
+    key_str = _get_encryption_key()
+    key_len = len(key_str)
     try:
         decoded = base64.b64decode(obfuscated_str.encode('ascii')).decode('utf-8')
-        json_str = ''.join(chr(ord(c) ^ key) for c in decoded)
+        json_str = ''.join(chr(ord(c) ^ ord(key_str[i % key_len])) for i, c in enumerate(decoded))
         return json.loads(json_str)
     except Exception as e:
         raise ValueError(f"Не удалось деобфусцировать данные: {e}")
@@ -273,12 +278,19 @@ def save_auth_state(context: "BrowserContext", path: Path) -> bool:
     """Сохраняет сессию с обфускацией и проверяет размер файла (диагностика)."""
     try:
         auth_data = context.storage_state()
-        obfuscated = obfuscate_data(auth_data)
+        config = load_config()
+        encrypt_status = config.getboolean("encrypt", "status", fallback=False)
+
+        if encrypt_status:
+            content_to_save = obfuscate_data(auth_data)
+        else:
+            content_to_save = json.dumps(auth_data, ensure_ascii=False, indent=2)
+
         with open(path, "w", encoding="utf-8") as f:
-            f.write(obfuscated)
+            f.write(content_to_save)
 
         size = os.path.getsize(path)
-        logger.info(f"Сессия сохранена в {path} (размер: {size} байт)")
+        logger.info(f"Сессия сохранена в {path} (размер: {size} байт, шифрование: {encrypt_status})")
 
         # Только предупреждение, не ошибка — размер может меняться в зависимости от версии Playwright
         if size < MIN_AUTH_STATE_SIZE:
@@ -296,10 +308,16 @@ def load_auth_state(path: Path) -> dict:
     """Загружает и деобфусцирует сохраненную сессию из файла."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            obfuscated = f.read().strip()
-        if not obfuscated:
+            content = f.read().strip()
+        if not content:
             raise ValueError("Файл сессии пуст")
-        return deobfuscate_data(obfuscated)
+
+        try:
+            # First try parsing as plain JSON
+            return json.loads(content)
+        except json.JSONDecodeError:
+            # If it fails, assume it's obfuscated
+            return deobfuscate_data(content)
     except Exception as e:
         logger.warning(f"Ошибка загрузки сессии: {e}")
         raise
